@@ -1,0 +1,27 @@
+services:
+  backend:
+    build:
+      context: ./backend 
+    container_name: fastapi
+    ports:
+      - "8000:8000"
+    environment:
+      # __pycache__ 를 생성하지 않음
+      - PYTHONDONTWRITEBYTECODE=1
+      # print() 같은 stdout 로그를 버퍼링없이 즉시 출력하게 함?
+      - PYTHONUNBUFFERED=1
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+  redis_insight:
+    image: redis/redisinsight:latest
+    container_name: redis_insight
+    ports:
+      - "5540:5540"
+    environment:
+      - RI_REDIS_HOST=host.docker.internal
+
+# TODO
+# 같은 네트워크로 묶기
