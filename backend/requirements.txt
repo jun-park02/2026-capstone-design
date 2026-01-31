@@ -1,0 +1,4 @@
+fastapi==0.128.0
+uvicorn==0.40.0
+pymavlink==2.4.49
+redis==7.1.0

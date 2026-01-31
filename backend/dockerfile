@@ -1,0 +1,9 @@
+FROM python:3.11.14-slim
+WORKDIR /app
+RUN pip install --no-cache-dir --upgrade pip
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+# 명시만 함. 8000번 포트를 실제로 여는 건 docker-compose.yml에서
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host=0.0.0.0", "--reload"]
