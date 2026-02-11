@@ -10,11 +10,51 @@ services:
       - PYTHONDONTWRITEBYTECODE=1
       # print() 같은 stdout 로그를 버퍼링없이 즉시 출력하게 함?
       - PYTHONUNBUFFERED=1
+    networks:
+      - app-network
+  
+  udp-rx:
+    build:
+      context: ./udp
+    container_name: udp-rx
+    ports:
+      - "14550:14550/udp"  # UDP 포트 매핑
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - UDP_PORT=14550
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - STREAM_KEY=mystream
+    command: python rx.py
+    networks:
+      - app-network
+    depends_on:
+      - redis
+  
+  udp-tx:
+    build:
+      context: ./udp
+    container_name: udp-tx
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - TARGET_IP=udp-rx  # Docker 네트워크에서 서비스 이름으로 접근
+      - TARGET_PORT=14550
+    command: python tx.py
+    networks:
+      - app-network
+    depends_on:
+      - udp-rx
+  
   redis:
     image: redis:latest
     container_name: redis
     ports:
       - "6379:6379"
+    networks:
+      - app-network
+  
   redis_insight:
     image: redis/redisinsight:latest
     container_name: redis_insight
@@ -22,6 +62,9 @@ services:
       - "5540:5540"
     environment:
       - RI_REDIS_HOST=host.docker.internal
+    networks:
+      - app-network
 
-# TODO
-# 같은 네트워크로 묶기
+networks:
+  app-network:
+    driver: bridge
