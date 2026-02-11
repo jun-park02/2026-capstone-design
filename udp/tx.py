@@ -1,5 +1,7 @@
 from pymavlink.dialects.v20 import common as mavlink2
-import time, socket
+import time
+import socket
+import os
 
 # mavlink 인코더(발신자) 생성
 # MAVLink는 MAVLink 메시지를 만들어서 바이트로 직렬화해주는 객체
@@ -11,7 +13,15 @@ mav.srcSystem = 1
 # 오토파일럿, 카메라, 짐벌 등
 mav.srcComponent = 1
 
-def send_udp(payload: bytes, ip="127.0.0.1", port=14550):
+# 환경 변수에서 대상 IP와 포트 가져오기
+TARGET_IP = os.getenv("TARGET_IP", "udp-rx")  # Docker: 서비스 이름, 로컬: 127.0.0.1
+TARGET_PORT = int(os.getenv("TARGET_PORT", "14550"))
+
+def send_udp(payload: bytes, ip=None, port=None):
+    if ip is None:
+        ip = TARGET_IP
+    if port is None:
+        port = TARGET_PORT
     # socket.AF_INET, socket.SOCK_DGRAM은 소켓을 만들 때 어떤 주소 체계로, 어떤 통신 방식으로 쓸지 지정하는 옵션
     # AF_INET은 ipv4 체계
     # SOCK_DGRAM은 데이터그램 방식(udp)
@@ -46,7 +56,28 @@ while True:
     pkt = att.pack(mav)
     send_udp(pkt)
 
-    print(seq)
+    # 위치 정보 
+    # seq를 사용해서 위치를 약간씩 변경
+    lat = 37.5665 + (seq * 0.0001)  # 위도 (degrees * 1e7)
+    lon = 126.9780 + (seq * 0.0001)  # 경도 (degrees * 1e7)
+    alt = 50.0 + (seq * 0.5)  # 상대 고도 (m)
+    relative_alt = alt * 1000  # 상대 고도 (mm)
+    
+    global_pos = mav.global_position_int_encode(
+        time_boot_ms=int(time.time() * 1000) & 0xFFFFFFFF,
+        lat=int(lat * 1e7),  # 위도 (degrees * 1e7)
+        lon=int(lon * 1e7),  # 경도 (degrees * 1e7)
+        alt=int(alt * 1000),  # 절대 고도 (mm)
+        relative_alt=int(relative_alt),  # 상대 고도 (mm)
+        vx=0,  # X 속도 (cm/s)
+        vy=0,  # Y 속도 (cm/s)
+        vz=0,  # Z 속도 (cm/s)
+        hdg=0  # 방위각 (cdeg, 0-36000)
+    )
+    
+    pkt = global_pos.pack(mav)
+    send_udp(pkt)
+
+    print(f"[TX] seq={seq}, target={TARGET_IP}:{TARGET_PORT}, lat={lat:.6f}, lon={lon:.6f}, alt={alt:.1f}m")
     seq += 1
     time.sleep(0.2)
-    break
