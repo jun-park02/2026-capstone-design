@@ -16,6 +16,15 @@ services:
       - MYSQL_DATABASE=mydb
       - MYSQL_USER=user
       - MYSQL_PASSWORD=password
+      - RAW_IMAGE_DIR=/app/images
+      - RAW_IMAGE_URL_PREFIX=/fire-images
+      - S3_UPLOAD_ENABLED=true
+      - AWS_ACCESS_KEY_ID=
+      - AWS_SECRET_ACCESS_KEY=
+      - AWS_REGION=ap-northeast-2
+      - AWS_S3_BUCKET=2026-capstone-design
+    volumes:
+      - ./mavlink/images:/app/images
     networks:
       - app-network
     depends_on:
@@ -23,7 +32,7 @@ services:
   
   udp-rx:
     build:
-      context: ./udp
+      context: ./mavlink
     container_name: udp-rx
     ports:
       - "14550:14550/udp"  # UDP 포트 매핑
@@ -34,7 +43,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - STREAM_KEY=mystream
-    command: python rx.py
+    command: python receiver.py
     networks:
       - app-network
     depends_on:
@@ -42,18 +51,41 @@ services:
   
   udp-tx:
     build:
-      context: ./udp
+      context: ./mavlink
     container_name: udp-tx
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - TARGET_IP=udp-rx  # Docker 네트워크에서 서비스 이름으로 접근
       - TARGET_PORT=14550
-    command: python tx.py
+    command: python transmitter.py
     networks:
       - app-network
     depends_on:
       - udp-rx
+
+  raw-udp-rx:
+    build:
+      context: ./mavlink
+    container_name: raw-udp-rx
+    ports:
+      - "14551:14551/udp"
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - UDP_PORT=14551
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - STREAM_KEY=fire_detect
+      - IMG_SAVE_DIR=/app/images
+      - SESSION_TIMEOUT_SEC=20
+    command: python raw_receiver.py
+    volumes:
+      - ./mavlink/images:/app/images
+    networks:
+      - app-network
+    depends_on:
+      - redis
   
   redis:
     image: redis:latest

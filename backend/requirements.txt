@@ -2,3 +2,7 @@ fastapi==0.128.0
 uvicorn==0.40.0
 pymavlink==2.4.49
 redis==7.1.0
+SQLAlchemy==2.0.44
+alembic==1.16.5
+PyMySQL==1.1.2
+boto3==1.40.31
