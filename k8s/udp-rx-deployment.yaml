@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udp-rx
+  namespace: capstone-design
+  labels:
+    app: udp-rx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: udp-rx
+  template:
+    metadata:
+      labels:
+        app: udp-rx
+    spec:
+      containers:
+      - name: udp-rx
+        # 이미지 빌드 후 레지스트리에 푸시 필요
+        image: udp-rx:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "rx.py"]
+        env:
+        - name: UDP_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: UDP_PORT
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: REDIS_PORT
+        - name: STREAM_KEY
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: STREAM_KEY
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        ports:
+        - containerPort: 14550
+          protocol: UDP
+          name: udp
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: udp-rx-service
+  namespace: capstone-design
+  labels:
+    app: udp-rx
+spec:
+  type: ClusterIP
+  ports:
+  - port: 14550
+    targetPort: 14550
+    protocol: UDP
+    name: udp
+  selector:
+    app: udp-rx
+
