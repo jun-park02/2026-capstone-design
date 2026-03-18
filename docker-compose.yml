@@ -16,15 +16,6 @@ services:
       - MYSQL_DATABASE=mydb
       - MYSQL_USER=user
       - MYSQL_PASSWORD=password
-      - RAW_IMAGE_DIR=/app/images
-      - RAW_IMAGE_URL_PREFIX=/fire-images
-      - S3_UPLOAD_ENABLED=true
-      - AWS_ACCESS_KEY_ID=
-      - AWS_SECRET_ACCESS_KEY=
-      - AWS_REGION=ap-northeast-2
-      - AWS_S3_BUCKET=2026-capstone-design
-    volumes:
-      - ./mavlink/images:/app/images
     networks:
       - app-network
     depends_on:
@@ -77,11 +68,17 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - STREAM_KEY=fire_detect
-      - IMG_SAVE_DIR=/app/images
       - SESSION_TIMEOUT_SEC=20
+      - AWS_ACCESS_KEY_ID=
+      - AWS_SECRET_ACCESS_KEY=
+      - AWS_REGION=ap-northeast-2
+      - AWS_S3_BUCKET=2026-capstone-design
+      - AWS_S3_KEY_PREFIX=fire-detect
+      # optional
+      - AWS_S3_PUBLIC_BASE_URL=
+      # optional
+      - AWS_S3_ENDPOINT_URL=
     command: python raw_receiver.py
-    volumes:
-      - ./mavlink/images:/app/images
     networks:
       - app-network
     depends_on:

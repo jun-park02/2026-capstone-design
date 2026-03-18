@@ -3,70 +3,54 @@ import json
 import os
 import socket
 import time
-from pathlib import Path
 from typing import Any
+
+import boto3
 import redis
+
 
 UDP_PORT = int(os.getenv("UDP_PORT", "14551"))
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 STREAM_KEY = os.getenv("STREAM_KEY", "fire_detect")
-IMAGE_SAVE_DIR = os.getenv("IMG_SAVE_DIR", "/app/images")
 SESSION_TIMEOUT_SEC = int(os.getenv("SESSION_TIMEOUT_SEC", "20"))
 
+_s3_client = None
+
+
 def create_redis_client():
-    """Redis 클라이언트를 생성하고 연결 상태를 확인"""
+    """Redis 클라이언트를 생성하고 연결 상태를 확인."""
     try:
         client = redis.Redis(
             host=REDIS_HOST,
             port=REDIS_PORT,
-            # 논리 DB 번호
             db=0,
             decode_responses=True,
             socket_connect_timeout=5,
         )
-        # 실패하면 예외 발생
         client.ping()
         print(f"[FIRE-DETECT-RX] Redis 연결 성공: {REDIS_HOST}:{REDIS_PORT}")
         return client
-    except Exception as e:
-        print(f"[FIRE-DETECT-RX] Redis 연결 실패: {e}")
+    except Exception as exc:
+        print(f"[FIRE-DETECT-RX] Redis 연결 실패: {exc}")
         return None
 
 
 def now_str() -> str:
-    """현재 로컬 시간을 문자열(YYYY-mm-dd HH:MM:SS)로 반환"""
+    """현재 로컬 시간을 문자열(YYYY-mm-dd HH:MM:SS)로 반환."""
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def decode_udp_payload(data: bytes) -> dict[str, Any] | None:
-    """UDP 바이트 데이터를 UTF-8 JSON으로 파싱
-
-    기대 패킷 형식 예시:
-    {
-      "event_id": "evt-001",
-      "image_id": "img-001",
-      "chunk_index": 0,
-      "chunk_total": 10,
-      "chunk_data": "<base64>",
-      # T : 날짜와 시간을 구분
-      # Z : UTC(한국 시간은 +9)
-      "captured_at": "2026-03-15T10:00:00Z", 
-      "lat": 36.69,
-      "lon": 126.58,
-      # 미터 단위
-      "alt": 55.2,
-      "confidence": 0.91,
-      "image_format": "jpg"
-    }
-    """
+    """UDP 바이트 데이터를 UTF-8 JSON으로 파싱."""
     try:
         return json.loads(data.decode("utf-8"))
     except Exception:
         return None
 
+
 def validate_chunk_message(payload: dict[str, Any]) -> tuple[bool, str]:
-    """청크 메시지 필수 키, 타입, 범위를 검증"""
+    """청크 메시지 필수 필드 및 범위를 검증."""
     required = ["event_id", "image_id", "chunk_index", "chunk_total", "chunk_data"]
     for key in required:
         if key not in payload:
@@ -85,40 +69,120 @@ def validate_chunk_message(payload: dict[str, Any]) -> tuple[bool, str]:
 
     return True, ""
 
-def cleanup_expired_sessions(sessions: dict[tuple[str, str, str, int], dict[str, Any]], now_ts: float):
-    """타임아웃된 미완성 세션을 제거해 메모리 누적을 방지"""
+
+def cleanup_expired_sessions(
+    sessions: dict[tuple[str, str, str, int], dict[str, Any]],
+    now_ts: float,
+):
+    """오랫동안 끝나지 않은 세션을 제거해 메모리 누수를 방지."""
     expired_keys = []
     for key, session in sessions.items():
         if now_ts - session["updated_at"] > SESSION_TIMEOUT_SEC:
             expired_keys.append(key)
+
     for key in expired_keys:
         session = sessions.pop(key)
         print(
-            f"[FIRE-DETECT-RX] 세션 만료 삭제: event={session['event_id']} "
+            f"[FIRE-DETECT-RX] 세션 만료 및 제거: event={session['event_id']} "
             f"image={session['image_id']} received={len(session['chunks'])}/{session['chunk_total']}"
         )
 
 
-def save_image(session: dict[str, Any], image_bytes: bytes) -> str:
-    """조립 완료된 이미지 바이트를 파일로 저장하고 경로를 반환"""
-    image_dir = Path(IMAGE_SAVE_DIR)
-    image_dir.mkdir(parents=True, exist_ok=True)
-
-    image_format = str(session["meta"].get("image_format", "jpg")).lower()
+def normalize_image_format(image_format: Any) -> str:
+    """지원하는 이미지 포맷으로 정규화."""
+    image_format = str(image_format or "jpg").lower()
     if image_format not in ("jpg", "jpeg", "png", "webp"):
-        image_format = "jpg"
-
-    file_name = f"{session['event_id']}_{session['image_id']}.{image_format}"
-    file_path = image_dir / file_name
-    file_path.write_bytes(image_bytes)
-    return str(file_path)
+        return "jpg"
+    return image_format
 
 
-def publish_completed_event(redis_client, session: dict[str, Any], image_path: str):
-    """이미지 조립 완료 이벤트를 Redis Stream에 기록"""
+def build_image_name(session: dict[str, Any]) -> str:
+    """이벤트/이미지 ID를 기반으로 S3 객체명을 생성."""
+    image_format = normalize_image_format(session["meta"].get("image_format"))
+    return f"{session['event_id']}_{session['image_id']}.{image_format}"
+
+
+def build_content_type(image_format: str) -> str:
+    """S3 업로드 시 사용할 Content-Type 계산."""
+    if image_format in ("jpg", "jpeg"):
+        return "image/jpeg"
+    if image_format == "png":
+        return "image/png"
+    if image_format == "webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def build_s3_url(bucket: str, key: str) -> str:
+    """버킷/키를 외부 접근용 URL로 변환."""
+    public_base_url = os.getenv("AWS_S3_PUBLIC_BASE_URL")
+    if public_base_url:
+        return f"{public_base_url.rstrip('/')}/{key}"
+
+    region = os.getenv("AWS_REGION", "ap-northeast-2")
+    return f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
+
+
+def create_s3_client():
+    """S3 클라이언트를 재사용해 업로드 비용을 줄인다."""
+    global _s3_client
+    if _s3_client is not None:
+        return _s3_client
+
+    client_kwargs = {}
+    region = os.getenv("AWS_REGION")
+    endpoint_url = os.getenv("AWS_S3_ENDPOINT_URL")
+    if region:
+        client_kwargs["region_name"] = region
+    if endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+
+    _s3_client = boto3.client("s3", **client_kwargs)
+    return _s3_client
+
+
+def upload_image_to_s3(session: dict[str, Any], image_bytes: bytes) -> dict[str, Any]:
+    """조립된 이미지 바이트를 바로 S3에 업로드하고 메타데이터를 반환."""
+    image_format = normalize_image_format(session["meta"].get("image_format"))
+    image_name = build_image_name(session)
+
+    bucket = os.getenv("AWS_S3_BUCKET")
+    if not bucket:
+        raise RuntimeError("AWS_S3_BUCKET is not configured")
+
+    key_prefix = os.getenv("AWS_S3_KEY_PREFIX", "fire-detect").strip("/")
+    object_key = f"{key_prefix}/{image_name}" if key_prefix else image_name
+    # 로컬 파일을 만들지 않고, 조립된 바이트를 바로 S3 객체로 올린다.
+    response = create_s3_client().put_object(
+        Bucket=bucket,
+        Key=object_key,
+        Body=image_bytes,
+        ContentType=build_content_type(image_format),
+    )
+
+    return {
+        "image_name": image_name,
+        "s3_bucket": bucket,
+        "s3_object_key": object_key,
+        "s3_image_url": build_s3_url(bucket, object_key),
+        "s3_etag": response.get("ETag"),
+        "s3_object_version_id": response.get("VersionId"),
+    }
+
+
+def publish_completed_event(
+    redis_client,
+    session: dict[str, Any],
+    s3_meta: dict[str, Any] | None,
+    upload_error: str | None = None,
+):
+    """이미지 조립 완료 이벤트를 Redis Stream에 기록."""
     if not redis_client:
         return
+
     try:
+        # 이후 백엔드와 DB 저장 로직이 그대로 쓸 수 있도록
+        # 이벤트 payload에 S3 메타데이터를 함께 실어 보낸다.
         payload = {
             "received_at": now_str(),
             "event_id": session["event_id"],
@@ -128,27 +192,35 @@ def publish_completed_event(redis_client, session: dict[str, Any], image_path: s
             "lon": session["meta"].get("lon"),
             "alt": session["meta"].get("alt"),
             "confidence": session["meta"].get("confidence"),
-            "image_format": session["meta"].get("image_format", "jpg"),
+            "image_format": normalize_image_format(session["meta"].get("image_format")),
             "chunk_total": session["chunk_total"],
-            "image_name": Path(image_path).name,
-            "image_path": image_path,
+            "image_name": build_image_name(session),
             "src_ip": session["src_ip"],
             "src_port": session["src_port"],
             "dst_port": UDP_PORT,
+            "s3_upload_status": "uploaded" if s3_meta else "failed",
+            "s3_upload_error": upload_error,
         }
+        if s3_meta:
+            payload.update(s3_meta)
+
         msg_id = redis_client.xadd(
             STREAM_KEY,
             {"payload": json.dumps(payload, ensure_ascii=False)},
             maxlen=10000,
             approximate=True,
         )
-        print(f"[FIRE-DETECT-RX] Redis Stream 저장(완료 이벤트): {msg_id}")
+        print(f"[FIRE-DETECT-RX] Redis Stream 추가 완료 이벤트: {msg_id}")
     except Exception as exc:
         print(f"[FIRE-DETECT-RX] Redis 저장 오류: {exc}")
 
 
-def try_finalize_session(redis_client, sessions: dict[tuple[str, str, str, int], dict[str, Any]], session_key):
-    """세션의 모든 청크 수신 시 이미지를 조립, 저장, 발행"""
+def try_finalize_session(
+    redis_client,
+    sessions: dict[tuple[str, str, str, int], dict[str, Any]],
+    session_key,
+):
+    """모든 청크가 모이면 이미지를 조립하고 S3 업로드 후 이벤트를 발행."""
     session = sessions.get(session_key)
     if not session:
         return
@@ -156,80 +228,79 @@ def try_finalize_session(redis_client, sessions: dict[tuple[str, str, str, int],
     if len(session["chunks"]) != session["chunk_total"]:
         return
 
-    # python list comprehension
-    # i: 0부터 session["chunk_total"]-1까지의 숫자
-    # i not in session["chunks"]: session["chunks"]에 없는 숫자
-    # missing: session["chunks"]에 없는 숫자들의 리스트
     missing = [i for i in range(session["chunk_total"]) if i not in session["chunks"]]
     if missing:
         return
 
+    # chunk_index 순서대로 정렬해 원본 이미지 바이트를 복원한다.
     ordered = [session["chunks"][i] for i in range(session["chunk_total"])]
     image_bytes = b"".join(ordered)
-    image_path = save_image(session, image_bytes)
-    publish_completed_event(redis_client, session, image_path)
+    s3_meta = None
+    upload_error = None
 
-    print(
-        f"[FIRE-DETECT-RX] 이미지 조립 완료: event={session['event_id']} "
-        f"image={session['image_id']} bytes={len(image_bytes)} path={image_path}"
-    )
+    try:
+        s3_meta = upload_image_to_s3(session, image_bytes)
+    except Exception as exc:
+        upload_error = str(exc)
+        print(
+            f"[FIRE-DETECT-RX] S3 업로드 실패: event={session['event_id']} "
+            f"image={session['image_id']} error={upload_error}"
+        )
+
+    publish_completed_event(redis_client, session, s3_meta, upload_error)
+
+    if s3_meta:
+        print(
+            f"[FIRE-DETECT-RX] 이미지 조립 및 S3 업로드 완료: event={session['event_id']} "
+            f"image={session['image_id']} bytes={len(image_bytes)} key={s3_meta['s3_object_key']}"
+        )
+    else:
+        print(
+            f"[FIRE-DETECT-RX] 이미지 조립 완료, S3 업로드 실패 상태로 이벤트 발행: "
+            f"event={session['event_id']} image={session['image_id']} bytes={len(image_bytes)}"
+        )
+
     sessions.pop(session_key, None)
 
 
 def main():
-    """화재 감지 UDP 패킷을 수신해 이미지로 재조립하고 완료 이벤트를 발행"""
-    # create_redis_client -> socket/bind -> sessions 상태 초기화 -> while 루프 진입
-    # - Redis 연결/UDP 소켓 준비 후, 세션 저장소를 만들고 패킷 처리 루프를 시작한다.
+    """화재 감지 UDP 청크를 수신해 이미지를 조립하고 완료 이벤트를 발행."""
     redis_client = create_redis_client()
 
-    # AF_INET: IPv4 주소 체계
-    # SOCK_DGRAM: UDP 통신
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", UDP_PORT))
     print(f"[FIRE-DETECT-RX] UDP 수신 시작: 0.0.0.0:{UDP_PORT}")
     print(f"[FIRE-DETECT-RX] Redis Stream: {STREAM_KEY}")
-    print(f"[FIRE-DETECT-RX] 이미지 저장 경로: {IMAGE_SAVE_DIR}")
 
-    # key: (event_id, image_id, src_ip, src_port)
+    # key 하나가 "같은 이미지 전송 세션"을 뜻한다.
     sessions: dict[tuple[str, str, str, int], dict[str, Any]] = {}
-    # unix timestamp
     last_cleanup_ts = time.time()
 
-    # recvfrom -> decode_udp_payload -> validate_chunk_message -> base64.b64decode
-    # -> try_finalize_session -> cleanup_expired_sessions(주기적)
-    # - 수신/파싱/검증/복원 후 세션에 청크를 누적하고, 완료되면 이미지 저장과 Redis 발행을 수행한다.
-    # - 마지막으로 주기적으로 타임아웃 세션을 정리해 메모리 누적을 방지한다.
     while True:
-        # 65535: 최대 패킷 크기
         data, (src_ip, src_port) = sock.recvfrom(65535)
         payload = decode_udp_payload(data)
-        # 1. JSON 파싱 실패 시 해당 패킷은 폐기하고 다음 패킷으로 진행
         if payload is None:
             print(f"[FIRE-DETECT-RX] JSON 파싱 실패: from={src_ip}:{src_port} size={len(data)}")
             continue
 
-        # 2. 필수 키/타입/범위 검증 실패 시 해당 패킷은 처리하지 않음
         is_valid, desc = validate_chunk_message(payload)
         if not is_valid:
             print(f"[FIRE-DETECT-RX] 패킷 검증 실패: {desc}")
             continue
 
-        # 3. 청크 조립에 필요한 기본 필드 추출
         event_id = str(payload["event_id"])
         image_id = str(payload["image_id"])
         chunk_index = payload["chunk_index"]
         chunk_total = payload["chunk_total"]
         chunk_data = payload["chunk_data"]
 
-        # 4. base64 청크 복원 실패 시 해당 패킷은 폐기
         try:
-            # validate=True: 청크 데이터가 base64 형식인지 검증
             chunk_bytes = base64.b64decode(chunk_data, validate=True)
         except Exception:
-            print(f"[FIRE-DETECT-RX] base64 디코딩 실패: event={event_id} image={image_id} chunk={chunk_index}")
+            print(f"[FIRE-DETECT-RX] base64 디코드 실패: event={event_id} image={image_id} chunk={chunk_index}")
             continue
 
-        # 5. 세션 키 기준으로 기존 세션 조회, 없으면 새 세션 생성
+        # event/image/src 조합으로 세션을 묶어야 여러 이미지 전송이 동시에 와도 섞이지 않는다.
         key = (event_id, image_id, src_ip, src_port)
         if key not in sessions:
             sessions[key] = {
@@ -251,7 +322,7 @@ def main():
             }
         session = sessions[key]
 
-        # 6. 같은 세션에서 chunk_total 값이 바뀌면 비정상 전송으로 판단하고 무시
+        # 같은 세션에서 총 청크 수가 바뀌면 비정상 전송으로 보고 무시한다.
         if session["chunk_total"] != chunk_total:
             print(
                 f"[FIRE-DETECT-RX] chunk_total 불일치: event={event_id} image={image_id} "
@@ -259,7 +330,7 @@ def main():
             )
             continue
 
-        # 7. 청크 저장 (같은 index 재수신 시 최신 값으로 덮어씀) + 최신 수신 시각 갱신
+        # 청크를 누적해두고, 매 수신마다 "모두 모였는지" 확인한다.
         session["chunks"][chunk_index] = chunk_bytes
         session["updated_at"] = time.time()
 
@@ -268,10 +339,9 @@ def main():
             f"{chunk_index + 1}/{chunk_total} from={src_ip}:{src_port}"
         )
 
-        # 8. 모든 청크가 모였는지 확인하고 완료 시 이미지 저장 + Redis 발행
         try_finalize_session(redis_client, sessions, key)
 
-        # 9. 1초마다 타임아웃된 미완성 세션 정리
+        # 오래 남아 있는 미완성 세션은 주기적으로 정리한다.
         now_ts = time.time()
         if now_ts - last_cleanup_ts >= 1.0:
             cleanup_expired_sessions(sessions, now_ts)
