@@ -1,26 +1,24 @@
-import json
-import os
 from contextlib import asynccontextmanager
-
-import redis
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-
 from app.fire_detect_listener import FireDetectListener
 from app.redis_consumer import RedisStreamConsumer
+import redis
+import json
+import os
 
-
-consumer: RedisStreamConsumer | None = None
 redis_client: redis.Redis | None = None
-fire_listener: FireDetectListener | None = None
-
 RAW_IMAGE_DIR = os.getenv("RAW_IMAGE_DIR", "/app/images")
 RAW_IMAGE_URL_PREFIX = os.getenv("RAW_IMAGE_URL_PREFIX", "/fire-images")
 
+# 드론텔레메트리 consumer
+consumer: RedisStreamConsumer | None = None
+fire_listener: FireDetectListener | None = None
 
+# FastAPI앱이 시작/종료될 때 실행할 작업을 묶어두는 생명주기 함수
+# yield 전후로 시작/종료로 나뉨
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """애플리케이션 생명주기 관리."""
     global consumer, redis_client, fire_listener
 
     consumer = RedisStreamConsumer(
@@ -47,7 +45,6 @@ async def lifespan(app: FastAPI):
         block_ms=int(os.getenv("FIRE_DETECT_BLOCK_MS", "5000")),
     )
     await fire_listener.start()
-    print("백그라운드 태스크 시작됨")
 
     yield
 
@@ -57,18 +54,17 @@ async def lifespan(app: FastAPI):
         await consumer.stop()
     if redis_client:
         redis_client.close()
-    print("백그라운드 태스크 중지됨")
-
 
 app = FastAPI(lifespan=lifespan)
 os.makedirs(RAW_IMAGE_DIR, exist_ok=True)
-app.mount(RAW_IMAGE_URL_PREFIX, StaticFiles(directory=RAW_IMAGE_DIR), name="fire-images")
 
+# /fire-images/... 요청이 오면
+# RAW_IMAGE_DIR에 저장된 이미지를 정적 파일로 그대로 제공
+app.mount(RAW_IMAGE_URL_PREFIX, StaticFiles(directory=RAW_IMAGE_DIR), name="fire-images")
 
 @app.get("/")
 def root():
     return {"msg": "root"}
-
 
 @app.get("/health")
 def health():
@@ -80,7 +76,6 @@ def health():
         "fire_listener_running": fire_listener.is_running if fire_listener else False,
         "last_fire_event_id": fire_listener.last_event_id if fire_listener else None,
     }
-
 
 @app.get("/mavlink/latest")
 def get_latest_mavlink_message():
@@ -105,7 +100,6 @@ def get_latest_mavlink_message():
 
     return {"ok": True, "stream_key": stream_key, "id": msg_id, "data": payload}
 
-
 @app.get("/raw/latest")
 def get_latest_raw_udp_message():
     """Redis Streams에서 최신 Raw UDP 메시지 1건 조회."""
@@ -129,7 +123,6 @@ def get_latest_raw_udp_message():
         "data": payload,
         "image_url": image_url,
     }
-
 
 @app.get("/raw/latest/live")
 def get_latest_raw_udp_message_live():

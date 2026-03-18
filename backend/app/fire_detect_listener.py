@@ -132,11 +132,16 @@ class FireDetectListener:
         while self.is_running:
             try:
                 loop = asyncio.get_event_loop()
+                # redis-py의 xread는 동기 함수라 이벤트 루프를 막지 않도록
+                # 기본 스레드 풀에서 실행하고 여기서는 결과만 await 한다.
                 resp = await loop.run_in_executor(
                     None,
                     lambda: self.redis_client.xread(
+                        # last_id 이후에 들어온 메시지를 1개씩 읽는다.
+                        # 처음 값이 "$" 이므로 리스너 시작 이후의 새 이벤트만 받는다.
                         streams={self.stream_key: last_id},
                         count=1,
+                        # 새 이벤트가 없으면 block_ms 동안 기다렸다가 빈 응답을 준다.
                         block=self.block_ms,
                     ),
                 )
