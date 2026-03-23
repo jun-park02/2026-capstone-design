@@ -3,9 +3,9 @@ import json
 import os
 import socket
 import time
+from pathlib import Path
 from typing import Any
 
-import boto3
 import redis
 
 
@@ -13,9 +13,8 @@ UDP_PORT = int(os.getenv("UDP_PORT", "14551"))
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 STREAM_KEY = os.getenv("STREAM_KEY", "fire_detect")
+IMAGE_SAVE_DIR = os.getenv("IMG_SAVE_DIR", "/app/images")
 SESSION_TIMEOUT_SEC = int(os.getenv("SESSION_TIMEOUT_SEC", "20"))
-
-_s3_client = None
 
 
 def create_redis_client():
@@ -97,92 +96,30 @@ def normalize_image_format(image_format: Any) -> str:
 
 
 def build_image_name(session: dict[str, Any]) -> str:
-    """이벤트/이미지 ID를 기반으로 S3 객체명을 생성."""
+    """이벤트/이미지 ID를 기반으로 파일명을 생성."""
     image_format = normalize_image_format(session["meta"].get("image_format"))
     return f"{session['event_id']}_{session['image_id']}.{image_format}"
 
 
-def build_content_type(image_format: str) -> str:
-    """S3 업로드 시 사용할 Content-Type 계산."""
-    if image_format in ("jpg", "jpeg"):
-        return "image/jpeg"
-    if image_format == "png":
-        return "image/png"
-    if image_format == "webp":
-        return "image/webp"
-    return "application/octet-stream"
+def save_image(session: dict[str, Any], image_bytes: bytes) -> str:
+    """조립된 이미지 바이트를 공유 볼륨에 저장하고 경로를 반환."""
+    image_dir = Path(IMAGE_SAVE_DIR)
+    image_dir.mkdir(parents=True, exist_ok=True)
 
-
-def build_s3_url(bucket: str, key: str) -> str:
-    """버킷/키를 외부 접근용 URL로 변환."""
-    public_base_url = os.getenv("AWS_S3_PUBLIC_BASE_URL")
-    if public_base_url:
-        return f"{public_base_url.rstrip('/')}/{key}"
-
-    region = os.getenv("AWS_REGION", "ap-northeast-2")
-    return f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-
-
-def create_s3_client():
-    """S3 클라이언트를 재사용해 업로드 비용을 줄인다."""
-    global _s3_client
-    if _s3_client is not None:
-        return _s3_client
-
-    client_kwargs = {}
-    region = os.getenv("AWS_REGION")
-    endpoint_url = os.getenv("AWS_S3_ENDPOINT_URL")
-    if region:
-        client_kwargs["region_name"] = region
-    if endpoint_url:
-        client_kwargs["endpoint_url"] = endpoint_url
-
-    _s3_client = boto3.client("s3", **client_kwargs)
-    return _s3_client
-
-
-def upload_image_to_s3(session: dict[str, Any], image_bytes: bytes) -> dict[str, Any]:
-    """조립된 이미지 바이트를 바로 S3에 업로드하고 메타데이터를 반환."""
-    image_format = normalize_image_format(session["meta"].get("image_format"))
     image_name = build_image_name(session)
-
-    bucket = os.getenv("AWS_S3_BUCKET")
-    if not bucket:
-        raise RuntimeError("AWS_S3_BUCKET is not configured")
-
-    key_prefix = os.getenv("AWS_S3_KEY_PREFIX", "fire-detect").strip("/")
-    object_key = f"{key_prefix}/{image_name}" if key_prefix else image_name
-    # 로컬 파일을 만들지 않고, 조립된 바이트를 바로 S3 객체로 올린다.
-    response = create_s3_client().put_object(
-        Bucket=bucket,
-        Key=object_key,
-        Body=image_bytes,
-        ContentType=build_content_type(image_format),
-    )
-
-    return {
-        "image_name": image_name,
-        "s3_bucket": bucket,
-        "s3_object_key": object_key,
-        "s3_image_url": build_s3_url(bucket, object_key),
-        "s3_etag": response.get("ETag"),
-        "s3_object_version_id": response.get("VersionId"),
-    }
+    image_path = image_dir / image_name
+    image_path.write_bytes(image_bytes)
+    return str(image_path)
 
 
-def publish_completed_event(
-    redis_client,
-    session: dict[str, Any],
-    s3_meta: dict[str, Any] | None,
-    upload_error: str | None = None,
-):
+def publish_completed_event(redis_client, session: dict[str, Any], image_path: str, image_bytes: bytes):
     """이미지 조립 완료 이벤트를 Redis Stream에 기록."""
     if not redis_client:
         return
 
     try:
-        # 이후 백엔드와 DB 저장 로직이 그대로 쓸 수 있도록
-        # 이벤트 payload에 S3 메타데이터를 함께 실어 보낸다.
+        # FastAPI는 이 메타데이터만 Redis에서 받고,
+        # 실제 이미지 파일은 공유 볼륨 경로로 읽어 S3 업로드와 DB 저장을 진행한다.
         payload = {
             "received_at": now_str(),
             "event_id": session["event_id"],
@@ -195,14 +132,12 @@ def publish_completed_event(
             "image_format": normalize_image_format(session["meta"].get("image_format")),
             "chunk_total": session["chunk_total"],
             "image_name": build_image_name(session),
+            "image_path": image_path,
+            "image_size_bytes": len(image_bytes),
             "src_ip": session["src_ip"],
             "src_port": session["src_port"],
             "dst_port": UDP_PORT,
-            "s3_upload_status": "uploaded" if s3_meta else "failed",
-            "s3_upload_error": upload_error,
         }
-        if s3_meta:
-            payload.update(s3_meta)
 
         msg_id = redis_client.xadd(
             STREAM_KEY,
@@ -220,7 +155,7 @@ def try_finalize_session(
     sessions: dict[tuple[str, str, str, int], dict[str, Any]],
     session_key,
 ):
-    """모든 청크가 모이면 이미지를 조립하고 S3 업로드 후 이벤트를 발행."""
+    """모든 청크가 모이면 이미지를 조립하고 Redis 이벤트를 발행."""
     session = sessions.get(session_key)
     if not session:
         return
@@ -235,30 +170,14 @@ def try_finalize_session(
     # chunk_index 순서대로 정렬해 원본 이미지 바이트를 복원한다.
     ordered = [session["chunks"][i] for i in range(session["chunk_total"])]
     image_bytes = b"".join(ordered)
-    s3_meta = None
-    upload_error = None
+    image_path = save_image(session, image_bytes)
 
-    try:
-        s3_meta = upload_image_to_s3(session, image_bytes)
-    except Exception as exc:
-        upload_error = str(exc)
-        print(
-            f"[FIRE-DETECT-RX] S3 업로드 실패: event={session['event_id']} "
-            f"image={session['image_id']} error={upload_error}"
-        )
+    publish_completed_event(redis_client, session, image_path, image_bytes)
 
-    publish_completed_event(redis_client, session, s3_meta, upload_error)
-
-    if s3_meta:
-        print(
-            f"[FIRE-DETECT-RX] 이미지 조립 및 S3 업로드 완료: event={session['event_id']} "
-            f"image={session['image_id']} bytes={len(image_bytes)} key={s3_meta['s3_object_key']}"
-        )
-    else:
-        print(
-            f"[FIRE-DETECT-RX] 이미지 조립 완료, S3 업로드 실패 상태로 이벤트 발행: "
-            f"event={session['event_id']} image={session['image_id']} bytes={len(image_bytes)}"
-        )
+    print(
+        f"[FIRE-DETECT-RX] 이미지 조립 완료, Redis 이벤트 발행: "
+        f"event={session['event_id']} image={session['image_id']} bytes={len(image_bytes)} path={image_path}"
+    )
 
     sessions.pop(session_key, None)
 
@@ -271,6 +190,7 @@ def main():
     sock.bind(("0.0.0.0", UDP_PORT))
     print(f"[FIRE-DETECT-RX] UDP 수신 시작: 0.0.0.0:{UDP_PORT}")
     print(f"[FIRE-DETECT-RX] Redis Stream: {STREAM_KEY}")
+    print(f"[FIRE-DETECT-RX] 이미지 저장 경로: {IMAGE_SAVE_DIR}")
 
     # key 하나가 "같은 이미지 전송 세션"을 뜻한다.
     sessions: dict[tuple[str, str, str, int], dict[str, Any]] = {}

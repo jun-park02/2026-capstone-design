@@ -12,6 +12,7 @@ from app.redis_consumer import RedisStreamConsumer
 redis_client: redis.Redis | None = None
 consumer: RedisStreamConsumer | None = None
 fire_listener: FireDetectListener | None = None
+RAW_IMAGE_DIR = os.getenv("RAW_IMAGE_DIR", "/app/images")
 
 
 @asynccontextmanager
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI):
     # fire_detect 스트림을 계속 감시하면서 마지막 이벤트를 메모리에 캐시한다.
     fire_listener = FireDetectListener(
         redis_client=redis_client,
+        raw_image_dir=RAW_IMAGE_DIR,
         stream_key=os.getenv("RAW_STREAM_KEY", "fire_detect"),
         block_ms=int(os.getenv("FIRE_DETECT_BLOCK_MS", "5000")),
     )
@@ -114,6 +116,11 @@ def get_latest_raw_udp_message():
     msg_id, fields = entries[0]
     payload_raw = fields.get("payload")
     payload = json.loads(payload_raw) if payload_raw else None
+
+    # 최신 Redis 이벤트가 이미 백그라운드 리스너에서 처리된 상태라면
+    # S3 업로드/DB 저장 결과까지 포함된 캐시 값을 우선 반환한다.
+    if fire_listener and fire_listener.last_event_id == msg_id and fire_listener.last_event:
+        return {"ok": True, **fire_listener.last_event}
 
     return {
         "ok": True,
