@@ -26,6 +26,16 @@ services:
       - AWS_S3_PUBLIC_BASE_URL=
       # optional
       - AWS_S3_ENDPOINT_URL=
+      # 메일 설정
+      - GMAIL_USERNAME=${GMAIL_USERNAME:-}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD:-}
+      - GMAIL_FROM_EMAIL=${GMAIL_FROM_EMAIL:-}
+      - GMAIL_FROM_NAME=${GMAIL_FROM_NAME:-Fire Detect}
+      - GMAIL_SMTP_HOST=${GMAIL_SMTP_HOST:-smtp.gmail.com}
+      - GMAIL_SMTP_PORT=${GMAIL_SMTP_PORT:-587}
+      - GMAIL_USE_TLS=${GMAIL_USE_TLS:-true}
+      - FIRE_CONFIRM_BASE_URL=${FIRE_CONFIRM_BASE_URL:-}
+      - APP_BASE_URL=${APP_BASE_URL:-}
     volumes:
       - ./mavlink/images:/app/images
     networks:

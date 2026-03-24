@@ -12,6 +12,7 @@ import redis
 from sqlalchemy import select
 
 from app.db import SessionLocal
+from app.fire_confirmation import send_confirmation_emails_for_event
 from app.models import FireEvent, FireEventImage
 
 
@@ -278,6 +279,19 @@ class FireDetectListener:
         except Exception as exc:
             processed_payload["db_save_status"] = "failed"
             processed_payload["db_save_error"] = str(exc)
+
+        if processed_payload.get("db_save_status") == "saved":
+            session = SessionLocal()
+            try:
+                event = session.get(FireEvent, processed_payload.get("db_fire_event_pk"))
+                if event is not None:
+                    processed_payload.update(send_confirmation_emails_for_event(session, event))
+            except Exception as exc:
+                session.rollback()
+                processed_payload["confirmation_email_status"] = "failed"
+                processed_payload["confirmation_email_reason"] = str(exc)
+            finally:
+                session.close()
 
         return {
             "id": msg_id,

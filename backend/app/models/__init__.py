@@ -5,7 +5,12 @@ SQLAlchemy models package.
 Alembic autogenerate 시 metadata에 반영됩니다.
 """
 
-from app.models.fire_event import FireEvent, FireEventImage
+from app.models.fire_event import FireEvent, FireEventEmailNotification, FireEventImage, NotificationRecipient
 
-__all__ = ["FireEvent", "FireEventImage"]
+__all__ = [
+    "FireEvent",
+    "FireEventEmailNotification",
+    "FireEventImage",
+    "NotificationRecipient",
+]
 

@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ForeignKey, Index, JSON, Numeric, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, ForeignKey, Index, JSON, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.mysql import BIGINT, DATETIME, INTEGER
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,7 +12,7 @@ from app.db import Base
 
 
 class FireEvent(Base):
-    """화재 감지 이벤트 원본 메타데이터."""
+    """Fire event metadata."""
 
     __tablename__ = "fire_events"
     __table_args__ = (
@@ -32,6 +32,9 @@ class FireEvent(Base):
     src_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     src_port: Mapped[int | None] = mapped_column(INTEGER(unsigned=True), nullable=True)
     dst_port: Mapped[int | None] = mapped_column(INTEGER(unsigned=True), nullable=True)
+    user_confirmation: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    user_confirmed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    user_confirmed_by_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DATETIME(fsp=6),
@@ -49,10 +52,15 @@ class FireEvent(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    email_notifications: Mapped[list["FireEventEmailNotification"]] = relationship(
+        back_populates="fire_event",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class FireEventImage(Base):
-    """화재 이벤트에 연결된 이미지 및 S3 저장 메타데이터."""
+    """Image metadata stored for a fire event."""
 
     __tablename__ = "fire_event_images"
     __table_args__ = (
@@ -81,9 +89,7 @@ class FireEventImage(Base):
         nullable=False,
         server_default=text("'s3'"),
     )
-    # S3 bucket 이름은 최대 63자라 그 범위에 맞춘다.
     bucket: Mapped[str | None] = mapped_column(String(63), nullable=True)
-    # object_key는 우리 생성 규칙상 512자로 충분하고, 복합 유니크 인덱스 길이 제한도 만족한다.
     object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     object_version_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -106,3 +112,76 @@ class FireEventImage(Base):
     )
 
     fire_event: Mapped["FireEvent"] = relationship(back_populates="images")
+
+
+class NotificationRecipient(Base):
+    """Email recipient for fire confirmation requests."""
+
+    __tablename__ = "notification_recipients"
+    __table_args__ = (Index("ix_notification_recipients_is_active", "is_active"),)
+
+    id: Mapped[int] = mapped_column(BIGINT(unsigned=True), primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP(6)"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)"),
+    )
+
+    email_notifications: Mapped[list["FireEventEmailNotification"]] = relationship(
+        back_populates="recipient",
+    )
+
+
+class FireEventEmailNotification(Base):
+    """Email delivery and confirmation state per recipient."""
+
+    __tablename__ = "fire_event_email_notifications"
+    __table_args__ = (
+        UniqueConstraint("fire_event_id", "recipient_email", name="uq_fire_event_recipient_email"),
+        UniqueConstraint("confirm_token_hash", name="uq_confirm_token_hash"),
+        Index("ix_fire_event_email_notifications_sent_status", "sent_status"),
+        Index("ix_fire_event_email_notifications_decision", "decision"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT(unsigned=True), primary_key=True, autoincrement=True)
+    fire_event_id: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True),
+        ForeignKey("fire_events.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    recipient_id: Mapped[int | None] = mapped_column(
+        BIGINT(unsigned=True),
+        ForeignKey("notification_recipients.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    confirm_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    sent_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    send_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    decision: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    responded_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP(6)"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)"),
+    )
+
+    fire_event: Mapped["FireEvent"] = relationship(back_populates="email_notifications")
+    recipient: Mapped["NotificationRecipient | None"] = relationship(back_populates="email_notifications")
