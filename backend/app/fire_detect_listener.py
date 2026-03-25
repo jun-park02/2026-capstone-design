@@ -3,6 +3,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import traceback
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -36,6 +37,9 @@ class FireDetectListener:
         self.last_event_id: str | None = None
         self._task: asyncio.Task | None = None
         self._s3_client = None
+
+    def _log(self, message: str) -> None:
+        print(f"[FIRE-DETECT-LISTENER] {message}")
 
     def _normalize_image_format(self, image_format: Any) -> str:
         """지원하는 이미지 포맷으로 정규화."""
@@ -88,6 +92,13 @@ class FireDetectListener:
         if endpoint_url:
             client_kwargs["endpoint_url"] = endpoint_url
 
+        self._log(
+            "S3 client init: "
+            f"region={region or '-'} "
+            f"endpoint={endpoint_url or '-'} "
+            f"access_key_set={'yes' if os.getenv('AWS_ACCESS_KEY_ID') else 'no'} "
+            f"secret_key_set={'yes' if os.getenv('AWS_SECRET_ACCESS_KEY') else 'no'}"
+        )
         self._s3_client = boto3.client("s3", **client_kwargs)
         return self._s3_client
 
@@ -134,6 +145,17 @@ class FireDetectListener:
             image_bytes = image_file.read()
 
         content_type, _ = mimetypes.guess_type(local_path)
+        self._log(
+            "S3 upload start: "
+            f"event_id={payload.get('event_id')} "
+            f"image_id={payload.get('image_id')} "
+            f"local_path={local_path} "
+            f"exists={'yes' if os.path.exists(local_path) else 'no'} "
+            f"size_bytes={len(image_bytes)} "
+            f"content_type={content_type or '-'} "
+            f"bucket={bucket} "
+            f"object_key={object_key}"
+        )
         kwargs = {
             "Bucket": bucket,
             "Key": object_key,
@@ -142,7 +164,22 @@ class FireDetectListener:
         if content_type:
             kwargs["ContentType"] = content_type
 
-        response = self._create_s3_client().put_object(**kwargs)
+        try:
+            response = self._create_s3_client().put_object(**kwargs)
+        except Exception as exc:
+            self._log(
+                "S3 upload failed: "
+                f"event_id={payload.get('event_id')} "
+                f"image_id={payload.get('image_id')} "
+                f"local_path={local_path} "
+                f"bucket={bucket} "
+                f"object_key={object_key} "
+                f"error_type={type(exc).__name__} "
+                f"error={exc}"
+            )
+            self._log(traceback.format_exc().rstrip())
+            raise
+
         s3_meta = {
             "s3_bucket": bucket,
             "s3_object_key": object_key,
@@ -152,6 +189,16 @@ class FireDetectListener:
             "s3_upload_status": "uploaded",
             "s3_upload_error": None,
         }
+        self._log(
+            "S3 upload success: "
+            f"event_id={payload.get('event_id')} "
+            f"image_id={payload.get('image_id')} "
+            f"bucket={bucket} "
+            f"object_key={object_key} "
+            f"etag={response.get('ETag')} "
+            f"version_id={response.get('VersionId')} "
+            f"url={s3_meta['s3_image_url']}"
+        )
         return s3_meta, image_bytes
 
     def _save_event_to_db_sync(
@@ -251,7 +298,28 @@ class FireDetectListener:
 
     def _process_event_sync(self, msg_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Redis 이벤트를 S3 업로드 + DB 저장까지 처리한다."""
-        local_path = self._get_local_image_path(payload)
+        self._log(
+            "Process event start: "
+            f"msg_id={msg_id} "
+            f"event_id={payload.get('event_id')} "
+            f"image_id={payload.get('image_id')}"
+        )
+        try:
+            local_path = self._get_local_image_path(payload)
+        except Exception as exc:
+            self._log(
+                "Local image resolution failed: "
+                f"msg_id={msg_id} "
+                f"event_id={payload.get('event_id')} "
+                f"image_id={payload.get('image_id')} "
+                f"image_path={payload.get('image_path')} "
+                f"raw_image_dir={self.raw_image_dir} "
+                f"error_type={type(exc).__name__} "
+                f"error={exc}"
+            )
+            self._log(traceback.format_exc().rstrip())
+            raise
+        self._log(f"Resolved local image path: msg_id={msg_id} local_path={local_path}")
         processed_payload = dict(payload)
 
         s3_meta = None
@@ -265,6 +333,13 @@ class FireDetectListener:
             upload_error = str(exc)
             processed_payload["s3_upload_status"] = "failed"
             processed_payload["s3_upload_error"] = upload_error
+            self._log(
+                "Process event S3 stage failed: "
+                f"msg_id={msg_id} "
+                f"event_id={payload.get('event_id')} "
+                f"error_type={type(exc).__name__} "
+                f"error={exc}"
+            )
 
         try:
             db_meta = self._save_event_to_db_sync(
@@ -279,6 +354,14 @@ class FireDetectListener:
         except Exception as exc:
             processed_payload["db_save_status"] = "failed"
             processed_payload["db_save_error"] = str(exc)
+            self._log(
+                "DB save failed after S3 stage: "
+                f"msg_id={msg_id} "
+                f"event_id={payload.get('event_id')} "
+                f"error_type={type(exc).__name__} "
+                f"error={exc}"
+            )
+            self._log(traceback.format_exc().rstrip())
 
         if processed_payload.get("db_save_status") == "saved":
             session = SessionLocal()
@@ -290,6 +373,14 @@ class FireDetectListener:
                 session.rollback()
                 processed_payload["confirmation_email_status"] = "failed"
                 processed_payload["confirmation_email_reason"] = str(exc)
+                self._log(
+                    "Confirmation email stage failed: "
+                    f"msg_id={msg_id} "
+                    f"event_id={payload.get('event_id')} "
+                    f"error_type={type(exc).__name__} "
+                    f"error={exc}"
+                )
+                self._log(traceback.format_exc().rstrip())
             finally:
                 session.close()
 
@@ -332,6 +423,7 @@ class FireDetectListener:
                             None,
                             lambda msg_id=msg_id, payload=payload: self._process_event_sync(msg_id, payload),
                         )
+                        self._log(f"새 이벤트 수신 및 처리 완료: {msg_id}")
 
                         # 마지막 이벤트를 메모리에 캐시해 /raw/latest/live 에서
                         # Redis 재조회 없이 바로 응답할 수 있게 한다.

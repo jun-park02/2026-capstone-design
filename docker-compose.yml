@@ -17,8 +17,8 @@ services:
       - MYSQL_USER=user
       - MYSQL_PASSWORD=password
       - RAW_IMAGE_DIR=/app/images
-      - AWS_ACCESS_KEY_ID= ${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY= ${AWS_SECRET_ACCESS_KEY}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=ap-northeast-2
       - AWS_S3_BUCKET=2026-capstone-design
       - AWS_S3_KEY_PREFIX=fire-detect
@@ -27,15 +27,15 @@ services:
       # optional
       - AWS_S3_ENDPOINT_URL=
       # 메일 설정
-      - GMAIL_USERNAME=${GMAIL_USERNAME:-}
-      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD:-}
-      - GMAIL_FROM_EMAIL=${GMAIL_FROM_EMAIL:-}
-      - GMAIL_FROM_NAME=${GMAIL_FROM_NAME:-Fire Detect}
-      - GMAIL_SMTP_HOST=${GMAIL_SMTP_HOST:-smtp.gmail.com}
-      - GMAIL_SMTP_PORT=${GMAIL_SMTP_PORT:-587}
-      - GMAIL_USE_TLS=${GMAIL_USE_TLS:-true}
-      - FIRE_CONFIRM_BASE_URL=${FIRE_CONFIRM_BASE_URL:-}
-      - APP_BASE_URL=${APP_BASE_URL:-}
+      - GMAIL_USERNAME=${GMAIL_USERNAME}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - GMAIL_FROM_EMAIL=${GMAIL_FROM_EMAIL}
+      - GMAIL_FROM_NAME=${GMAIL_FROM_NAME}
+      - GMAIL_SMTP_HOST=${GMAIL_SMTP_HOST}
+      - GMAIL_SMTP_PORT=${GMAIL_SMTP_PORT}
+      - GMAIL_USE_TLS=${GMAIL_USE_TLS}
+      - FIRE_CONFIRM_BASE_URL=${FIRE_CONFIRM_BASE_URL}
+      - APP_BASE_URL=${APP_BASE_URL}
     volumes:
       - ./mavlink/images:/app/images
     networks:
