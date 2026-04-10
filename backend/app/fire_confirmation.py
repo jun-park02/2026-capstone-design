@@ -4,12 +4,13 @@ import re
 import secrets
 import smtplib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
 from html import escape
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.models import FireEvent, FireEventEmailNotification, NotificationRecipient
 
 EMAIL_PATTERN = re.compile(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", re.IGNORECASE)
+KST = ZoneInfo("Asia/Seoul")
 
 
 def normalize_email_address(email: str) -> str:
@@ -70,7 +72,9 @@ def _display_value(value: Any) -> str:
 def _display_datetime(value: datetime | None) -> str:
     if value is None:
         return "-"
-    return value.strftime("%Y-%m-%d %H:%M:%S UTC")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S KST")
 
 
 @dataclass(slots=True)
@@ -138,7 +142,7 @@ class FireConfirmationMailer:
         no_link = self._build_confirmation_link(token, "N")
         image_url_safe = escape(image_url, quote=True)
 
-        subject = f"[Fire Detect] Event {event.event_id} needs confirmation"
+        subject = f"[Fire Detect] {event.event_id}"
         text_body = "\n".join(
             [
                 "Fire event confirmation requested.",
@@ -164,7 +168,7 @@ class FireConfirmationMailer:
     <p style="margin: 0 0 8px;">Confidence: {_display_value(event.confidence)}</p>
     <p style="margin: 0 0 8px;">Latitude: {_display_value(event.lat)}</p>
     <p style="margin: 0 0 16px;">Longitude: {_display_value(event.lon)}</p>
-    <p style="margin: 0 0 12px;">Review the image below and confirm whether this is a real fire.</p>
+    <p style="margin: 0 0 12px;">이미지를 확인하고 화재 확정 버튼을 눌러주세요.</p>
     <p style="margin: 0 0 16px;">
       <img
         src="{image_url_safe}"
@@ -182,7 +186,7 @@ class FireConfirmationMailer:
         style="display: inline-block; padding: 10px 16px; background: #1f2937; color: #fff; text-decoration: none; border-radius: 6px;"
       >Not a fire (N)</a>
     </p>
-    <p style="margin: 0;">Image link: <a href="{image_url_safe}">{image_url_safe}</a></p>
+    <p style="margin: 0;">이미지 링크: <a href="{image_url_safe}">{image_url_safe}</a></p>
   </body>
 </html>
 """.strip()

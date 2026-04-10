@@ -304,6 +304,7 @@ class FireDetectListener:
             f"event_id={payload.get('event_id')} "
             f"image_id={payload.get('image_id')}"
         )
+        # Redis payload에는 이미지 메타데이터만 있으므로, 먼저 공유 볼륨의 실제 파일 경로를 찾는다.
         try:
             local_path = self._get_local_image_path(payload)
         except Exception as exc:
@@ -320,12 +321,16 @@ class FireDetectListener:
             self._log(traceback.format_exc().rstrip())
             raise
         self._log(f"Resolved local image path: msg_id={msg_id} local_path={local_path}")
+
+        # 최종 응답에는 원본 payload에 처리 결과를 덧붙여 내려준다.
         processed_payload = dict(payload)
 
+        # 각 단계가 실패해도 다음 단계에서 상태를 기록할 수 있게 기본값을 준비한다.
         s3_meta = None
         upload_error = None
         image_bytes = None
 
+        # 1) 이미지를 S3에 업로드하고, 성공 시 생성된 메타데이터를 payload에 반영한다.
         try:
             s3_meta, image_bytes = self._upload_image_to_s3_sync(local_path, payload)
             processed_payload.update(s3_meta)
@@ -341,6 +346,7 @@ class FireDetectListener:
                 f"error={exc}"
             )
 
+        # 2) S3 업로드 결과와 관계없이 이벤트/이미지 메타데이터는 DB에 저장해 추적 가능하게 한다.
         try:
             db_meta = self._save_event_to_db_sync(
                 msg_id=msg_id,
@@ -363,11 +369,13 @@ class FireDetectListener:
             )
             self._log(traceback.format_exc().rstrip())
 
+        # 3) DB 저장이 끝난 이벤트만 대상으로 확인 메일을 발송한다.
         if processed_payload.get("db_save_status") == "saved":
             session = SessionLocal()
             try:
                 event = session.get(FireEvent, processed_payload.get("db_fire_event_pk"))
                 if event is not None:
+                    # 메일 발송 결과도 같은 payload에 합쳐서 이후 조회 API에서 바로 볼 수 있게 한다.
                     processed_payload.update(send_confirmation_emails_for_event(session, event))
             except Exception as exc:
                 session.rollback()
@@ -384,6 +392,7 @@ class FireDetectListener:
             finally:
                 session.close()
 
+        # 리스너 캐시와 조회 API가 그대로 재사용할 수 있는 형태로 가공해 반환한다.
         return {
             "id": msg_id,
             "stream_key": self.stream_key,
@@ -425,7 +434,7 @@ class FireDetectListener:
                         )
                         self._log(f"새 이벤트 수신 및 처리 완료: {msg_id}")
 
-                        # 마지막 이벤트를 메모리에 캐시해 /raw/latest/live 에서
+                        # 마지막 이벤트를 메모리에 캐시해 /raw/latest/live 엔드포인트에서
                         # Redis 재조회 없이 바로 응답할 수 있게 한다.
                         self.last_event_id = msg_id
                         self.last_event = processed_event

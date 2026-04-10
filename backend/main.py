@@ -111,8 +111,15 @@ def _sync_cached_confirmation(event: FireEvent) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    FastAPI 애플리케이션의 생명주기 동안 필요한 백그라운드 리소스를 초기화하고 정리하는 함수.
+
+    서버 시작 시 Redis 스트림 컨슈머와 화재 감지 리스너를 시작하고,
+    서버 종료 시 관련 리소스를 순서대로 종료한다.
+    """
     global consumer, redis_client, fire_listener
 
+    # MAVLink 메시지를 소비할 Redis 스트림 컨슈머를 생성하고 시작한다.
     consumer = RedisStreamConsumer(
         redis_host=os.getenv("REDIS_HOST", "redis"),
         redis_port=int(os.getenv("REDIS_PORT", "6379")),
@@ -122,6 +129,7 @@ async def lifespan(app: FastAPI):
     )
     await consumer.start()
 
+    # 앱 전역에서 사용할 Redis 클라이언트를 초기화한다.
     redis_client = redis.Redis(
         host=os.getenv("REDIS_HOST", "redis"),
         port=int(os.getenv("REDIS_PORT", "6379")),
@@ -129,6 +137,7 @@ async def lifespan(app: FastAPI):
         decode_responses=True,
     )
 
+    # 화재 감지 스트림을 실시간으로 감시하는 리스너를 생성하고 시작한다.
     fire_listener = FireDetectListener(
         redis_client=redis_client,
         raw_image_dir=RAW_IMAGE_DIR,
@@ -137,8 +146,10 @@ async def lifespan(app: FastAPI):
     )
     await fire_listener.start()
 
+    # 여기서부터 앱이 실제 요청을 처리한다.
     yield
 
+    # 서버 종료 시 시작했던 리소스를 정리한다.
     if fire_listener:
         await fire_listener.stop()
     if consumer:
@@ -171,16 +182,23 @@ def register_notification_recipients(
     request: NotificationRecipientsRequest,
     session: Session = Depends(get_db_session),
 ):
+    """
+    알림 수신자 이메일을 등록하고, 이미 존재하지만 비활성화된 수신자는 다시 활성화하는 엔드포인트
+    요청 본문으로 {"emails": [...]} 형태의 이메일 주소 리스트를 받는다.
+    """
+    # 이메일을 먼저 정규화하고 형식이 잘못된 항목은 따로 모은다.
     emails, invalid_emails = normalize_and_validate_emails(request.emails)
     if invalid_emails:
         raise HTTPException(status_code=400, detail={"invalid_emails": invalid_emails})
     if not emails:
         raise HTTPException(status_code=400, detail="at least one valid email is required")
 
+    # 처리 결과를 상태별로 나눠 응답에 담는다.
     created: list[str] = []
     reactivated: list[str] = []
     existing: list[str] = []
 
+    # 각 이메일은 신규 등록, 기등록, 비활성 계정 재활성화 중 하나로 처리한다.
     for email in emails:
         recipient = session.scalar(select(NotificationRecipient).where(NotificationRecipient.email == email))
         if recipient is None:
@@ -193,6 +211,7 @@ def register_notification_recipients(
         recipient.is_active = True
         reactivated.append(email)
 
+    # 변경 사항을 저장한 뒤 현재 활성 수신자 수를 다시 집계한다.
     session.commit()
 
     total_active = session.scalar(

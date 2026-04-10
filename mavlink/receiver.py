@@ -11,7 +11,6 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 STREAM_KEY = os.getenv("STREAM_KEY", "mystream")
 
-
 def create_redis_client():
     try:
         client = redis.Redis(
@@ -27,7 +26,6 @@ def create_redis_client():
     except Exception as exc:
         print(f"[RX] Redis 연결 실패: {exc}")
         return None
-
 
 def main():
     redis_client = create_redis_client()

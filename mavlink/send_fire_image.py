@@ -17,7 +17,7 @@ def detect_image_format(image_path: Path) -> str:
         return ext
     return "jpg"
 
-IMAGE_PATH = Path(r"C:\test\519196_gettyimages1270593514_590256.jpg")
+IMAGE_PATH = Path(r"C:\test\123123123123123.jpg")
 TARGET_IP = "127.0.0.1"
 TARGET_PORT = 14551
 CHUNK_SIZE = 1200

@@ -48,7 +48,7 @@ services:
       context: ./mavlink
     container_name: udp-rx
     ports:
-      - "14550:14550/udp"  # UDP 포트 매핑
+      - "14550:14550/udp" 
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
