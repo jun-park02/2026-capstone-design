@@ -334,6 +334,33 @@ def get_suspected_fire_event_count(session: Session = Depends(get_db_session)):
     }
 
 
+@app.get("/fire-events/confirmation-completed/count")
+def get_confirmation_completed_fire_event_count(session: Session = Depends(get_db_session)):
+    """
+    화재 확인 메일이 발송되었고 사용자가 Y/N 중 하나로 확정을 완료한 화재 이벤트 수를 조회한다.
+
+    집계 기준:
+    - FireEvent.user_confirmation 이 NULL 이 아닌 이벤트
+    - 연결된 FireEventEmailNotification 중 sent_status 가 "sent" 인 메일이 1건 이상 존재하는 이벤트
+    - 수신자가 여러 명이어도 같은 화재 이벤트는 1건으로 집계
+    """
+    completed_count = session.scalar(
+        # 메일 발송 대상이 여러 명일 수 있으므로 이벤트 PK 기준으로 중복 제거한다.
+        select(func.count(func.distinct(FireEvent.id)))
+        .select_from(FireEvent)
+        .join(FireEventEmailNotification, FireEventEmailNotification.fire_event_id == FireEvent.id)
+        .where(
+            FireEvent.user_confirmation.is_not(None),
+            FireEventEmailNotification.sent_status == "sent",
+        )
+    ) or 0
+
+    return {
+        "ok": True,
+        "confirmation_completed_count": completed_count,
+    }
+
+
 @app.get("/mavlink/latest")
 def get_latest_mavlink_message():
     if not redis_client:
