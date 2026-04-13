@@ -7,3 +7,4 @@ mavlink/__pycache__/
 backend/alembic/versions/__pycache__/
 .vscode/
 .env
+__init__.py
