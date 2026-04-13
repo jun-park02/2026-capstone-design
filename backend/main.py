@@ -18,7 +18,7 @@ from app.fire_confirmation import (
     send_confirmation_emails_for_event,
 )
 from app.fire_detect_listener import FireDetectListener
-from app.models import FireEvent, NotificationRecipient
+from app.models import FireEvent, FireEventEmailNotification, NotificationRecipient
 from app.redis_consumer import RedisStreamConsumer
 
 
@@ -305,6 +305,33 @@ def send_fire_event_confirmation_emails(
 
     result = send_confirmation_emails_for_event(session, event, force_resend=force_resend)
     return {"ok": True, "event_id": event.event_id, **result}
+
+
+@app.get("/fire-events/suspected/count")
+def get_suspected_fire_event_count(session: Session = Depends(get_db_session)):
+    """
+    화재 확인 메일이 발송되었지만 아직 사용자가 확정하지 않은 화재 이벤트 수를 조회한다.
+
+    집계 기준:
+    - FireEvent.user_confirmation 이 NULL 인 이벤트
+    - 연결된 FireEventEmailNotification 중 sent_status 가 "sent" 인 메일이 1건 이상 존재하는 이벤트
+    - 수신자가 여러 명이어도 같은 화재 이벤트는 1건으로 집계
+    """
+    suspected_count = session.scalar(
+        # 메일 발송 대상이 여러 명일 수 있으므로 이벤트 PK 기준으로 중복 제거한다.
+        select(func.count(func.distinct(FireEvent.id)))
+        .select_from(FireEvent)
+        .join(FireEventEmailNotification, FireEventEmailNotification.fire_event_id == FireEvent.id)
+        .where(
+            FireEvent.user_confirmation.is_(None),
+            FireEventEmailNotification.sent_status == "sent",
+        )
+    ) or 0
+
+    return {
+        "ok": True,
+        "suspected_fire_count": suspected_count,
+    }
 
 
 @app.get("/mavlink/latest")
