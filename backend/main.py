@@ -1,6 +1,7 @@
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from html import escape
 from typing import Any
 
@@ -358,6 +359,68 @@ def get_confirmation_completed_fire_event_count(session: Session = Depends(get_d
     return {
         "ok": True,
         "confirmation_completed_count": completed_count,
+    }
+
+
+@app.get("/fire-events/current-status")
+def get_current_fire_event_status(
+    window_minutes: int = Query(30, ge=1, le=1440),
+    session: Session = Depends(get_db_session),
+):
+    """
+    최근 일정 시간 동안의 화재 이벤트 상태를 정상/경고/위험 중 하나로 판정한다.
+
+    1차 판정 규칙:
+    - 최근 window_minutes 내에 사용자 확정 결과가 "Y" 인 이벤트가 1건 이상이면 "위험"
+    - 아니고 최근 window_minutes 내에 메일 발송 후 아직 미확정인 이벤트가 1건 이상이면 "경고"
+    - 둘 다 없으면 "정상"
+    """
+    evaluated_at = datetime.utcnow()
+    window_start = evaluated_at - timedelta(minutes=window_minutes)
+
+    confirmed_fire_count = session.scalar(
+        # 수신자가 여러 명이어도 같은 화재 이벤트는 1건으로 집계한다.
+        select(func.count(func.distinct(FireEvent.id)))
+        .select_from(FireEvent)
+        .join(FireEventEmailNotification, FireEventEmailNotification.fire_event_id == FireEvent.id)
+        .where(
+            FireEvent.received_at >= window_start,
+            FireEvent.user_confirmation == "Y",
+            FireEventEmailNotification.sent_status == "sent",
+        )
+    ) or 0
+
+    pending_suspected_count = session.scalar(
+        # 확인 메일은 발송됐지만 아직 사용자 응답이 없는 이벤트만 집계한다.
+        select(func.count(func.distinct(FireEvent.id)))
+        .select_from(FireEvent)
+        .join(FireEventEmailNotification, FireEventEmailNotification.fire_event_id == FireEvent.id)
+        .where(
+            FireEvent.received_at >= window_start,
+            FireEvent.user_confirmation.is_(None),
+            FireEventEmailNotification.sent_status == "sent",
+        )
+    ) or 0
+
+    if confirmed_fire_count > 0:
+        status = "위험"
+        reason = f"최근 {window_minutes}분 내 실제 화재 확정 {confirmed_fire_count}건"
+    elif pending_suspected_count > 0:
+        status = "경고"
+        reason = f"최근 {window_minutes}분 내 미확정 화재 의심 {pending_suspected_count}건"
+    else:
+        status = "정상"
+        reason = f"최근 {window_minutes}분 내 확정 화재 및 미확정 의심 없음"
+
+    return {
+        "ok": True,
+        "status": status,
+        "reason": reason,
+        "evaluated_at": evaluated_at.isoformat() + "Z",
+        "metrics": {
+            "confirmed_fire_count": confirmed_fire_count,
+            "pending_suspected_count": pending_suspected_count,
+        },
     }
 
 
