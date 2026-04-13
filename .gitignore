@@ -8,3 +8,4 @@ backend/alembic/versions/__pycache__/
 .vscode/
 .env
 __init__.py
+__pycache__/
