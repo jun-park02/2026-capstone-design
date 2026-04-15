@@ -3,12 +3,18 @@ import os
 import socket
 import time
 
-# mavlink 인코더(발신자) 생성
+# MAVLink 인코더(발신자) 생성
 mav = mavlink2.MAVLink(None)
-mav.srcSystem = 1
-mav.srcComponent = 1
 
-# 환경 변수에서 대상 IP/포트 가져오기
+MAVLINK_SYS_ID = int(os.getenv("MAVLINK_SYS_ID", "1"))
+MAVLINK_COMP_ID = int(os.getenv("MAVLINK_COMP_ID", "1"))
+POSITION_OFFSET = float(os.getenv("POSITION_OFFSET", "0"))
+ALT_OFFSET = float(os.getenv("ALT_OFFSET", "0"))
+
+mav.srcSystem = MAVLINK_SYS_ID
+mav.srcComponent = MAVLINK_COMP_ID
+
+# 환경 변수에서 대상 IP/포트를 가져오기
 TARGET_IP = os.getenv("TARGET_IP", "udp-rx")
 TARGET_PORT = int(os.getenv("TARGET_PORT", "14550"))
 
@@ -26,6 +32,11 @@ def send_udp(payload: bytes, ip=None, port=None):
 
 def main():
     seq = 0
+    print(
+        f"[TX] sysid={MAVLINK_SYS_ID}, compid={MAVLINK_COMP_ID}, "
+        f"target={TARGET_IP}:{TARGET_PORT}, position_offset={POSITION_OFFSET}, alt_offset={ALT_OFFSET}"
+    )
+
     while True:
         hb = mav.heartbeat_encode(
             type=mavlink2.MAV_TYPE_QUADROTOR,
@@ -47,10 +58,10 @@ def main():
         )
         send_udp(att.pack(mav))
 
-        # 위치 정보: seq 기준으로 조금씩 변화
-        lat = 37.5665 + (seq * 0.0001)
-        lon = 126.9780 + (seq * 0.0001)
-        alt = 50.0 + (seq * 0.5)
+        # 위치 정보는 드론별 오프셋과 seq 기반으로 조금씩 변화시킨다.
+        lat = 37.5665 + POSITION_OFFSET + (seq * 0.0001)
+        lon = 126.9780 + POSITION_OFFSET + (seq * 0.0001)
+        alt = 50.0 + ALT_OFFSET + (seq * 0.5)
 
         global_pos = mav.global_position_int_encode(
             time_boot_ms=int(time.time() * 1000) & 0xFFFFFFFF,
@@ -66,7 +77,7 @@ def main():
         send_udp(global_pos.pack(mav))
 
         print(
-            f"[TX] seq={seq}, target={TARGET_IP}:{TARGET_PORT}, "
+            f"[TX] sysid={MAVLINK_SYS_ID}, seq={seq}, target={TARGET_IP}:{TARGET_PORT}, "
             f"lat={lat:.6f}, lon={lon:.6f}, alt={alt:.1f}m"
         )
         seq += 1

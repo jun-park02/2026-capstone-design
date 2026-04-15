@@ -71,6 +71,29 @@ services:
       - PYTHONUNBUFFERED=1
       - TARGET_IP=udp-rx  # Docker 네트워크에서 서비스 이름으로 접근
       - TARGET_PORT=14550
+      - MAVLINK_SYS_ID=1
+      - MAVLINK_COMP_ID=1
+      - POSITION_OFFSET=0
+      - ALT_OFFSET=0
+    command: python transmitter.py
+    networks:
+      - app-network
+    depends_on:
+      - udp-rx
+
+  udp-tx-2:
+    build:
+      context: ./mavlink
+    container_name: udp-tx-2
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - TARGET_IP=udp-rx
+      - TARGET_PORT=14550
+      - MAVLINK_SYS_ID=2
+      - MAVLINK_COMP_ID=1
+      - POSITION_OFFSET=0.001
+      - ALT_OFFSET=10
     command: python transmitter.py
     networks:
       - app-network
