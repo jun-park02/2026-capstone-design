@@ -4,7 +4,49 @@ import asyncio
 import os
 import socket
 import uuid
-from typing import Optional
+from typing import Any, Optional
+
+
+DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
+DRONE_PATH_KEY_PREFIX = os.getenv("DRONE_PATH_KEY_PREFIX", "drone:path")
+DRONE_PATH_MAX_POINTS = int(os.getenv("DRONE_PATH_MAX_POINTS", "1000"))
+DRONE_PATH_TTL_SEC = int(os.getenv("DRONE_PATH_TTL_SEC", "86400"))
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_coordinate(value: Any, *, max_abs: float, scale: float = 1e7) -> float | None:
+    coordinate = _to_float(value)
+    if coordinate is None:
+        return None
+    if abs(coordinate) > max_abs:
+        coordinate = coordinate / scale
+    if abs(coordinate) > max_abs:
+        return None
+    return coordinate
+
+
+def _normalize_millimeters(value: Any) -> float | None:
+    distance = _to_float(value)
+    if distance is None:
+        return None
+    return distance / 1000
 
 
 def generate_consumer_name(base_name: str = "fastapi-consumer") -> str:
@@ -64,6 +106,52 @@ class RedisStreamConsumer:
         self.poll_interval = float(os.getenv("REDIS_POLL_INTERVAL", "0.01"))  # 메시지 처리 후 대기 시간
         self.is_running = False
         self._task: Optional[asyncio.Task] = None
+
+    def _drone_path_key(self, system_id: int | str) -> str:
+        return f"{DRONE_PATH_KEY_PREFIX}:{system_id}"
+
+    def _cache_drone_position(self, msg_id: str, payload: dict[str, Any]) -> None:
+        if payload.get("message_type") != "GLOBAL_POSITION_INT":
+            return
+
+        data = payload.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                return
+        if not isinstance(data, dict):
+            return
+
+        lat = _normalize_coordinate(data.get("lat"), max_abs=90)
+        lon = _normalize_coordinate(data.get("lon"), max_abs=180)
+        system_id = _to_int(payload.get("system_id"))
+        if lat is None or lon is None or system_id is None:
+            return
+
+        component_id = _to_int(payload.get("component_id"))
+        point = {
+            "stream_id": msg_id,
+            "timestamp": payload.get("timestamp"),
+            "system_id": system_id,
+            "component_id": component_id,
+            "lat": lat,
+            "lon": lon,
+            "alt": _normalize_millimeters(data.get("alt")),
+            "relative_alt": _normalize_millimeters(data.get("relative_alt")),
+            "position": [lat, lon],
+            "heading": _to_float(data.get("hdg")),
+            "time_boot_ms": _to_int(data.get("time_boot_ms")),
+        }
+
+        key = self._drone_path_key(system_id)
+        pipe = self.redis_client.pipeline()
+        pipe.sadd(DRONE_PATH_IDS_KEY, str(system_id))
+        pipe.rpush(key, json.dumps(point, separators=(",", ":")))
+        pipe.ltrim(key, -DRONE_PATH_MAX_POINTS, -1)
+        pipe.expire(key, DRONE_PATH_TTL_SEC)
+        pipe.expire(DRONE_PATH_IDS_KEY, DRONE_PATH_TTL_SEC)
+        pipe.execute()
     
     def ensure_consumer_group(self):
         """컨슈머 그룹이 없으면 생성"""
@@ -87,6 +175,8 @@ class RedisStreamConsumer:
             payload = fields.get("payload")
             if payload:
                 data = json.loads(payload)
+                if isinstance(data, dict):
+                    self._cache_drone_position(msg_id, data)
                 return True
         except Exception as e:
             print(f"메시지 처리 오류: {e}")
