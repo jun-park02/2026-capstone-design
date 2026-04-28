@@ -14,7 +14,7 @@ MAVLink 송신기/드론
 ```
 
 ```text
-화재 이미지 UDP 송신
+화재 이미지 HTTP 업로드
   -> mavlink/raw_receiver.py
   -> Redis Stream fire_detect
   -> backend FireDetectListener
@@ -27,7 +27,7 @@ MAVLink 송신기/드론
 | 키 | 자료구조 | 작성자 | 용도 |
 | --- | --- | --- | --- |
 | `mystream` | Redis Stream | `mavlink/receiver.py` | MAVLink 원본 메시지 저장 |
-| `fire_detect` | Redis Stream | `mavlink/raw_receiver.py` | 조립 완료된 화재 이미지 이벤트 저장 |
+| `fire_detect` | Redis Stream | `mavlink/raw_receiver.py` | HTTP 업로드로 받은 화재 이미지 이벤트 저장 |
 | `drone:last_seen` | Sorted Set | `mavlink/receiver.py` | 드론별 마지막 HEARTBEAT 수신 시각 저장 |
 | `drone:status:<system_id>` | Hash | `mavlink/receiver.py` | 드론별 최신 HEARTBEAT 상태 저장 |
 | `drone:path:ids` | Set | `backend/app/redis_consumer.py` | 경로 캐시가 존재하는 드론 ID 목록 |
@@ -85,13 +85,15 @@ EXPIRE drone:path:<system_id> 86400
 
 ### 화재 감지 이벤트
 
-`mavlink/raw_receiver.py`가 UDP `14551`로 받은 이미지 청크를 조립한 뒤 `fire_detect` Stream에 완료 이벤트를 저장한다.
+`mavlink/raw_receiver.py`는 FastAPI 서버로 실행되며 `POST /fire-detections/upload`에서 `multipart/form-data` 이미지를 받는다. 업로드된 이미지를 공유 볼륨 `/app/images`에 저장한 뒤 `fire_detect` Stream에 완료 이벤트를 저장한다.
 
 ```text
 XADD fire_detect MAXLEN ~ 10000 payload=<json>
 ```
 
 이후 FastAPI의 `FireDetectListener`가 `fire_detect`를 읽고 S3 업로드, MySQL 저장, 확인 메일 발송을 처리한다.
+
+구 UDP 청크 수신 방식은 `mavlink/legacy/raw_udp_receiver.py`에 보관되어 있다.
 
 ## Redis에서 데이터를 읽는 엔드포인트
 

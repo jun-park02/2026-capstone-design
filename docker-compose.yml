@@ -105,16 +105,16 @@ services:
       context: ./mavlink
     container_name: raw-udp-rx
     ports:
-      - "14551:14551/udp"
+      - "14551:8000"
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
-      - UDP_PORT=14551
+      - HTTP_PORT=8000
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - STREAM_KEY=fire_detect
       - IMG_SAVE_DIR=/app/images
-      - SESSION_TIMEOUT_SEC=20
+      - MAX_UPLOAD_BYTES=20971520
     command: python raw_receiver.py
     volumes:
       - ./mavlink/images:/app/images
