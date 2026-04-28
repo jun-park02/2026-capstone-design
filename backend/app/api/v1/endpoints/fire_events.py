@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -8,10 +8,81 @@ from sqlalchemy.orm import Session
 from app.api.v1.helpers import render_confirmation_page, sync_cached_confirmation
 from app.db import get_db_session
 from app.fire_confirmation import apply_confirmation_decision, send_confirmation_emails_for_event
-from app.models import FireEvent, FireEventEmailNotification
+from app.models import DroneTelemetry, FireEvent, FireEventEmailNotification
 
 
 router = APIRouter(tags=["fire-events"])
+
+
+def _day_bounds_utc(tz_offset_hours: int = 9) -> tuple[datetime, datetime, str]:
+    tz = timezone(timedelta(hours=tz_offset_hours))
+    today = datetime.now(UTC).astimezone(tz).date()
+    start_local = datetime.combine(today, time.min, tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(UTC).replace(tzinfo=None),
+        end_local.astimezone(UTC).replace(tzinfo=None),
+        today.isoformat(),
+    )
+
+
+def _serialize_datetime(value):
+    return value.isoformat() if value is not None else None
+
+
+def _to_float(value):
+    return float(value) if value is not None else None
+
+
+def _fire_event_status(event: FireEvent) -> str:
+    if event.user_confirmation == "Y":
+        return "fire_confirmed"
+    if event.user_confirmation == "N":
+        return "reviewed"
+    return "pending"
+
+
+def _fire_image_url(event: FireEvent) -> str | None:
+    if isinstance(event.raw_payload, dict):
+        image_url = event.raw_payload.get("s3_image_url")
+        return str(image_url) if image_url else None
+    return None
+
+
+def _serialize_fire_event(event: FireEvent) -> dict:
+    return {
+        "event_id": event.event_id,
+        "redis_stream_id": event.redis_stream_id,
+        "status": _fire_event_status(event),
+        "received_at": _serialize_datetime(event.received_at),
+        "captured_at": _serialize_datetime(event.captured_at),
+        "lat": _to_float(event.lat),
+        "lon": _to_float(event.lon),
+        "alt": _to_float(event.alt),
+        "confidence": _to_float(event.confidence),
+        "image_url": _fire_image_url(event),
+        "user_confirmation": event.user_confirmation,
+        "user_confirmed_at": _serialize_datetime(event.user_confirmed_at),
+        "user_confirmed_by_email": event.user_confirmed_by_email,
+    }
+
+
+def _serialize_telemetry(row: DroneTelemetry) -> dict:
+    return {
+        "id": row.id,
+        "redis_stream_id": row.redis_stream_id,
+        "message_type": row.message_type,
+        "system_id": row.system_id,
+        "component_id": row.component_id,
+        "telemetry_at": _serialize_datetime(row.telemetry_at),
+        "lat": _to_float(row.lat),
+        "lon": _to_float(row.lon),
+        "alt": _to_float(row.alt),
+        "relative_alt": _to_float(row.relative_alt),
+        "heading": _to_float(row.heading),
+        "time_boot_ms": row.time_boot_ms,
+        "raw_payload": row.raw_payload,
+    }
 
 
 @router.get("/fire-events/confirm", response_class=HTMLResponse)
@@ -70,6 +141,145 @@ def send_fire_event_confirmation_emails(
 
     result = send_confirmation_emails_for_event(session, event, force_resend=force_resend)
     return {"ok": True, "event_id": event.event_id, **result}
+
+
+@router.get("/fire-events/pending")
+def list_pending_fire_events(
+    limit: int = Query(100, ge=1, le=1000),
+    session: Session = Depends(get_db_session),
+):
+    """Return fire events waiting for review."""
+    events = session.scalars(
+        select(FireEvent)
+        .where(FireEvent.user_confirmation.is_(None))
+        .order_by(FireEvent.received_at.desc(), FireEvent.id.desc())
+        .limit(limit)
+    ).all()
+    return {
+        "ok": True,
+        "status": "pending",
+        "count": len(events),
+        "items": [_serialize_fire_event(event) for event in events],
+    }
+
+
+@router.get("/fire-events/today/reviewed/count")
+def get_today_reviewed_fire_event_count(
+    tz_offset_hours: int = Query(9, ge=-12, le=14),
+    session: Session = Depends(get_db_session),
+):
+    """Count today's reviewed non-fire events."""
+    start_at, end_at, target_date = _day_bounds_utc(tz_offset_hours)
+    count = session.scalar(
+        select(func.count())
+        .select_from(FireEvent)
+        .where(
+            FireEvent.received_at >= start_at,
+            FireEvent.received_at < end_at,
+            FireEvent.user_confirmation == "N",
+        )
+    ) or 0
+    return {
+        "ok": True,
+        "date": target_date,
+        "status": "reviewed",
+        "count": count,
+        "tz_offset_hours": tz_offset_hours,
+    }
+
+
+@router.get("/fire-events/today/fire-confirmed/count")
+def get_today_fire_confirmed_event_count(
+    tz_offset_hours: int = Query(9, ge=-12, le=14),
+    session: Session = Depends(get_db_session),
+):
+    """Count today's confirmed fire events."""
+    start_at, end_at, target_date = _day_bounds_utc(tz_offset_hours)
+    count = session.scalar(
+        select(func.count())
+        .select_from(FireEvent)
+        .where(
+            FireEvent.received_at >= start_at,
+            FireEvent.received_at < end_at,
+            FireEvent.user_confirmation == "Y",
+        )
+    ) or 0
+    return {
+        "ok": True,
+        "date": target_date,
+        "status": "fire_confirmed",
+        "count": count,
+        "tz_offset_hours": tz_offset_hours,
+    }
+
+
+@router.get("/fire-events/today/with-telemetry")
+def list_today_fire_events_with_telemetry(
+    system_id: int | None = Query(None, ge=1),
+    telemetry_before_sec: int = Query(300, ge=0, le=86400),
+    telemetry_after_sec: int = Query(0, ge=0, le=86400),
+    telemetry_limit_per_event: int = Query(200, ge=1, le=2000),
+    telemetry_message_type: str = Query("GLOBAL_POSITION_INT", min_length=1, max_length=64),
+    tz_offset_hours: int = Query(9, ge=-12, le=14),
+    session: Session = Depends(get_db_session),
+):
+    """Return today's fire events with telemetry around each fire timestamp."""
+    start_at, end_at, target_date = _day_bounds_utc(tz_offset_hours)
+    events = session.scalars(
+        select(FireEvent)
+        .where(FireEvent.received_at >= start_at, FireEvent.received_at < end_at)
+        .order_by(FireEvent.received_at.desc(), FireEvent.id.desc())
+    ).all()
+
+    items = []
+    for event in events:
+        fire_at = event.captured_at or event.received_at
+        telemetry_start = fire_at - timedelta(seconds=telemetry_before_sec)
+        telemetry_end = fire_at + timedelta(seconds=telemetry_after_sec)
+        stmt = (
+            select(DroneTelemetry)
+            .where(
+                DroneTelemetry.telemetry_at >= telemetry_start,
+                DroneTelemetry.telemetry_at <= telemetry_end,
+                DroneTelemetry.message_type == telemetry_message_type,
+            )
+            .order_by(DroneTelemetry.telemetry_at.desc(), DroneTelemetry.id.desc())
+            .limit(telemetry_limit_per_event)
+        )
+        if system_id is not None:
+            stmt = stmt.where(DroneTelemetry.system_id == system_id)
+
+        telemetry_rows = list(reversed(session.scalars(stmt).all()))
+        latest_at_fire = None
+        for row in reversed(telemetry_rows):
+            if row.telemetry_at <= fire_at:
+                latest_at_fire = row
+                break
+
+        items.append(
+            {
+                "fire_event": _serialize_fire_event(event),
+                "fire_at": _serialize_datetime(fire_at),
+                "telemetry_window": {
+                    "start_at": _serialize_datetime(telemetry_start),
+                    "end_at": _serialize_datetime(telemetry_end),
+                    "before_sec": telemetry_before_sec,
+                    "after_sec": telemetry_after_sec,
+                    "message_type": telemetry_message_type,
+                    "system_id": system_id,
+                },
+                "matched_telemetry": _serialize_telemetry(latest_at_fire) if latest_at_fire else None,
+                "telemetry_count": len(telemetry_rows),
+                "telemetry": [_serialize_telemetry(row) for row in telemetry_rows],
+            }
+        )
+
+    return {
+        "ok": True,
+        "date": target_date,
+        "count": len(items),
+        "items": items,
+    }
 
 
 @router.get("/fire-events/suspected/count")

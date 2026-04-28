@@ -6,9 +6,11 @@ Alembic autogenerate 시 metadata에 반영됩니다.
 """
 
 from app.models.drone_telemetry import DroneTelemetry
+from app.models.dashboard_aggregate import DashboardAggregate
 from app.models.fire_event import FireEvent, FireEventEmailNotification, FireEventImage, NotificationRecipient
 
 __all__ = [
+    "DashboardAggregate",
     "DroneTelemetry",
     "FireEvent",
     "FireEventEmailNotification",
