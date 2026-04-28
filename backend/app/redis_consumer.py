@@ -4,13 +4,25 @@ import asyncio
 import os
 import socket
 import uuid
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
+
+from sqlalchemy import insert
+
+from app.db import SessionLocal
+from app.models import DroneTelemetry
 
 
 DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
 DRONE_PATH_KEY_PREFIX = os.getenv("DRONE_PATH_KEY_PREFIX", "drone:path")
 DRONE_PATH_MAX_POINTS = int(os.getenv("DRONE_PATH_MAX_POINTS", "1000"))
 DRONE_PATH_TTL_SEC = int(os.getenv("DRONE_PATH_TTL_SEC", "86400"))
+DRONE_TELEMETRY_DB_ENABLED = os.getenv("DRONE_TELEMETRY_DB_ENABLED", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 
 def _to_float(value: Any) -> float | None:
@@ -47,6 +59,50 @@ def _normalize_millimeters(value: Any) -> float | None:
     if distance is None:
         return None
     return distance / 1000
+
+
+def _parse_json(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(UTC).replace(tzinfo=None)
+        return value
+
+    if value is not None:
+        text = str(value).strip()
+        if text:
+            try:
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+                parsed = datetime.fromisoformat(text)
+            except ValueError:
+                try:
+                    parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    parsed = None
+            if parsed is not None:
+                if parsed.tzinfo is not None:
+                    return parsed.astimezone(UTC).replace(tzinfo=None)
+                return parsed
+
+    return datetime.utcnow()
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 def generate_consumer_name(base_name: str = "fastapi-consumer") -> str:
@@ -114,12 +170,7 @@ class RedisStreamConsumer:
         if payload.get("message_type") != "GLOBAL_POSITION_INT":
             return
 
-        data = payload.get("data")
-        if isinstance(data, str):
-            try:
-                data = json.loads(data)
-            except json.JSONDecodeError:
-                return
+        data = _parse_json(payload.get("data"))
         if not isinstance(data, dict):
             return
 
@@ -152,6 +203,47 @@ class RedisStreamConsumer:
         pipe.expire(key, DRONE_PATH_TTL_SEC)
         pipe.expire(DRONE_PATH_IDS_KEY, DRONE_PATH_TTL_SEC)
         pipe.execute()
+
+    def _build_telemetry_row(self, msg_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized_payload = dict(payload)
+        data = _parse_json(normalized_payload.get("data"))
+        if isinstance(data, dict):
+            normalized_payload["data"] = data
+        else:
+            data = {}
+
+        message_type = str(payload.get("message_type") or data.get("mavpackettype") or "UNKNOWN")[:64]
+        lat = _normalize_coordinate(data.get("lat"), max_abs=90)
+        lon = _normalize_coordinate(data.get("lon"), max_abs=180)
+
+        return {
+            "redis_stream_id": msg_id,
+            "message_type": message_type,
+            "system_id": _to_int(payload.get("system_id")),
+            "component_id": _to_int(payload.get("component_id")),
+            "telemetry_at": _parse_datetime(payload.get("timestamp")),
+            "lat": _to_decimal(lat),
+            "lon": _to_decimal(lon),
+            "alt": _to_decimal(_normalize_millimeters(data.get("alt"))),
+            "relative_alt": _to_decimal(_normalize_millimeters(data.get("relative_alt"))),
+            "heading": _to_decimal(_to_float(data.get("hdg"))),
+            "time_boot_ms": _to_int(data.get("time_boot_ms")),
+            "raw_payload": normalized_payload,
+        }
+
+    def _save_telemetry_rows(self, rows: list[dict[str, Any]]) -> None:
+        if not DRONE_TELEMETRY_DB_ENABLED or not rows:
+            return
+
+        session = SessionLocal()
+        try:
+            session.execute(insert(DroneTelemetry).prefix_with("IGNORE"), rows)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            print(f"Drone telemetry DB save failed: {exc}")
+        finally:
+            session.close()
     
     def ensure_consumer_group(self):
         """컨슈머 그룹이 없으면 생성"""
@@ -169,7 +261,7 @@ class RedisStreamConsumer:
             else:
                 raise
     
-    async def process_message(self, msg_id: str, fields: dict):
+    async def process_message(self, msg_id: str, fields: dict) -> tuple[bool, dict[str, Any] | None]:
         """메시지 처리"""
         try:
             payload = fields.get("payload")
@@ -177,10 +269,12 @@ class RedisStreamConsumer:
                 data = json.loads(payload)
                 if isinstance(data, dict):
                     self._cache_drone_position(msg_id, data)
-                return True
+                    return True, self._build_telemetry_row(msg_id, data)
+                return True, None
         except Exception as e:
             print(f"메시지 처리 오류: {e}")
-            return False
+            return False, None
+        return False, None
     
     async def process_batch(self, messages: list):
         """메시지 배치 처리
@@ -192,12 +286,17 @@ class RedisStreamConsumer:
             처리 성공한 msg_id 리스트
         """
         processed_ids = []
+        telemetry_rows: list[dict[str, Any]] = []
         
         # 모든 메시지 처리
         for msg_id, fields in messages:
-            success = await self.process_message(msg_id, fields)
+            success, telemetry_row = await self.process_message(msg_id, fields)
             if success:
                 processed_ids.append(msg_id)
+            if telemetry_row:
+                telemetry_rows.append(telemetry_row)
+
+        self._save_telemetry_rows(telemetry_rows)
         
         return processed_ids
     

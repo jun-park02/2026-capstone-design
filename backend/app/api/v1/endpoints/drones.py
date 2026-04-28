@@ -2,10 +2,14 @@ import os
 import time
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pymavlink import mavutil
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app import runtime
+from app.db import get_db_session
+from app.models import DroneTelemetry
 
 
 router = APIRouter(tags=["drones"])
@@ -17,6 +21,14 @@ DEFAULT_ACTIVE_TIMEOUT_SEC = int(os.getenv("DRONE_ACTIVE_TIMEOUT_SEC", "5"))
 
 def _drone_status_key(drone_id: str) -> str:
     return f"{DRONE_STATUS_KEY_PREFIX}:{drone_id}"
+
+
+def _to_float(value):
+    return float(value) if value is not None else None
+
+
+def _serialize_datetime(value):
+    return value.isoformat() if value is not None else None
 
 
 @router.get("/drones/active/count")
@@ -79,4 +91,47 @@ def get_active_drone_count(
         "active_drone_ids": active_drone_ids,
         "timeout_sec": timeout_sec,
         "evaluated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/drones/telemetry")
+def list_drone_telemetry(
+    system_id: int | None = Query(None, ge=1),
+    message_type: str | None = Query(None, min_length=1, max_length=64),
+    limit: int = Query(100, ge=1, le=5000),
+    session: Session = Depends(get_db_session),
+):
+    """Return persisted MAVLink telemetry rows from MySQL."""
+    stmt = select(DroneTelemetry).order_by(
+        DroneTelemetry.telemetry_at.desc(),
+        DroneTelemetry.id.desc(),
+    )
+    if system_id is not None:
+        stmt = stmt.where(DroneTelemetry.system_id == system_id)
+    if message_type:
+        stmt = stmt.where(DroneTelemetry.message_type == message_type)
+
+    rows = session.scalars(stmt.limit(limit)).all()
+    return {
+        "ok": True,
+        "count": len(rows),
+        "items": [
+            {
+                "id": row.id,
+                "redis_stream_id": row.redis_stream_id,
+                "message_type": row.message_type,
+                "system_id": row.system_id,
+                "component_id": row.component_id,
+                "telemetry_at": _serialize_datetime(row.telemetry_at),
+                "lat": _to_float(row.lat),
+                "lon": _to_float(row.lon),
+                "alt": _to_float(row.alt),
+                "relative_alt": _to_float(row.relative_alt),
+                "heading": _to_float(row.heading),
+                "time_boot_ms": row.time_boot_ms,
+                "raw_payload": row.raw_payload,
+                "created_at": _serialize_datetime(row.created_at),
+            }
+            for row in rows
+        ],
     }
