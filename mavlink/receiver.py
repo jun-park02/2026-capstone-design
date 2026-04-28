@@ -14,6 +14,7 @@ STREAM_KEY = os.getenv("STREAM_KEY", "mystream")
 DRONE_LAST_SEEN_KEY = os.getenv("DRONE_LAST_SEEN_KEY", "drone:last_seen")
 DRONE_STATUS_KEY_PREFIX = os.getenv("DRONE_STATUS_KEY_PREFIX", "drone:status")
 DRONE_STATUS_TTL_SEC = int(os.getenv("DRONE_STATUS_TTL_SEC", "86400"))
+MAVLINK_SAMPLE_INTERVAL_SEC = float(os.getenv("MAVLINK_SAMPLE_INTERVAL_SEC", "2"))
 
 
 def create_redis_client():
@@ -58,6 +59,30 @@ def get_mav_state_name(system_status: Any) -> str:
         return enum_entry.name
     except Exception:
         return str(system_status) if system_status is not None else "UNKNOWN"
+
+
+def should_process_message(
+    last_processed_at: dict[tuple[int | str, int | str, str], float],
+    *,
+    msg_type: str,
+    system_id: int | None,
+    component_id: int | None,
+    now: float,
+) -> bool:
+    if MAVLINK_SAMPLE_INTERVAL_SEC <= 0:
+        return True
+
+    message_key = (
+        system_id if system_id is not None else "unknown",
+        component_id if component_id is not None else "unknown",
+        msg_type,
+    )
+    last_seen = last_processed_at.get(message_key)
+    if last_seen is not None and now - last_seen < MAVLINK_SAMPLE_INTERVAL_SEC:
+        return False
+
+    last_processed_at[message_key] = now
+    return True
 
 
 def update_drone_status(
@@ -111,9 +136,11 @@ def main():
     redis_client = create_redis_client()
     print(f"[RX] UDP 수신 시작: 0.0.0.0:{UDP_PORT}")
     print(f"[RX] Redis Stream: {STREAM_KEY}")
+    print(f"[RX] MAVLink sample interval: {MAVLINK_SAMPLE_INTERVAL_SEC}s")
     print(f"[RX] 드론 상태 키: {DRONE_LAST_SEEN_KEY}, {DRONE_STATUS_KEY_PREFIX}:<sysid>")
 
     mav = mavutil.mavlink_connection(f"udp:0.0.0.0:{UDP_PORT}")
+    last_processed_at: dict[tuple[int | str, int | str, str], float] = {}
 
     while True:
         # recv_match는 pymavlink가 제공하는 MAVLink 메시지 수신 함수다.
@@ -124,6 +151,16 @@ def main():
         msg_type = msg.get_type()
         msg_dict = msg.to_dict()
         system_id, component_id = get_message_source_ids(msg)
+
+        if not should_process_message(
+            last_processed_at,
+            msg_type=msg_type,
+            system_id=system_id,
+            component_id=component_id,
+            now=time.monotonic(),
+        ):
+            continue
+
         print(f"[RX] {msg_type} sysid={system_id} compid={component_id}: {msg_dict}")
 
         if redis_client:
