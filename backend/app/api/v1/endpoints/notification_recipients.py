@@ -10,12 +10,108 @@ from app.models import NotificationRecipient
 
 router = APIRouter(tags=["notification-recipients"])
 
+REGISTER_NOTIFICATION_RECIPIENTS_RESPONSES = {
+    200: {
+        "description": "Notification recipients registration result",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ok": True,
+                    "created": ["new@example.com"],
+                    "reactivated": ["inactive@example.com"],
+                    "existing": ["already@example.com"],
+                    "total_active": 3,
+                }
+            }
+        },
+    },
+    400: {
+        "description": "Invalid email request",
+        "content": {
+            "application/json": {
+                "examples": {
+                    "invalidEmails": {
+                        "summary": "Invalid email values",
+                        "value": {
+                            "detail": {
+                                "invalid_emails": ["not-an-email"]
+                            }
+                        },
+                    },
+                    "emptyValidEmailList": {
+                        "summary": "No valid email values",
+                        "value": {
+                            "detail": "at least one valid email is required"
+                        },
+                    },
+                }
+            }
+        },
+    },
+}
+
+UPDATE_NOTIFICATION_RECIPIENT_RESPONSES = {
+    200: {
+        "description": "Updated notification recipient",
+        "content": {
+            "application/json": {
+                "example": {
+                    "email": "somefakes@naver.com",
+                    "is_active": False,
+                    "created_at": "2026-04-28T10:07:15.919552",
+                }
+            }
+        },
+    },
+    404: {
+        "description": "Notification recipient not found",
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": "notification recipient not found"
+                }
+            }
+        },
+    },
+}
+
+DELETE_NOTIFICATION_RECIPIENT_RESPONSES = {
+    204: {
+        "description": "Notification recipient deleted. No response body is returned.",
+    },
+    404: {
+        "description": "Notification recipient not found",
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": "notification recipient not found"
+                }
+            }
+        },
+    },
+}
+
 
 class NotificationRecipientsRequest(BaseModel):
     emails: list[str] = Field(default_factory=list, min_length=1)
 
 
-@router.post("/notification-recipients")
+class NotificationRecipientStatusRequest(BaseModel):
+    is_active: bool
+
+
+def _serialize_notification_recipient(recipient: NotificationRecipient) -> dict[str, object]:
+    return {
+        "email": recipient.email,
+        "is_active": recipient.is_active,
+        "created_at": recipient.created_at.isoformat() if recipient.created_at else None,
+    }
+
+
+@router.post(
+    "/notification-recipients",
+    responses=REGISTER_NOTIFICATION_RECIPIENTS_RESPONSES,
+)
 def register_notification_recipients(
     request: NotificationRecipientsRequest,
     session: Session = Depends(get_db_session),
@@ -71,16 +167,44 @@ def list_notification_recipients(session: Session = Depends(get_db_session)):
     recipients = session.scalars(
         select(NotificationRecipient).order_by(NotificationRecipient.email)
     ).all()
-    return {
-        "ok": True,
-        "count": len(recipients),
-        "items": [
-            {
-                "email": recipient.email,
-                "is_active": recipient.is_active,
-                "created_at": recipient.created_at.isoformat() if recipient.created_at else None,
-                "updated_at": recipient.updated_at.isoformat() if recipient.updated_at else None,
-            }
-            for recipient in recipients
-        ],
-    }
+    return [_serialize_notification_recipient(recipient) for recipient in recipients]
+
+
+@router.patch(
+    "/notification-recipients/{email}",
+    responses=UPDATE_NOTIFICATION_RECIPIENT_RESPONSES,
+)
+def update_notification_recipient(
+    email: str,
+    request: NotificationRecipientStatusRequest,
+    session: Session = Depends(get_db_session),
+):
+    recipient = session.scalar(
+        select(NotificationRecipient).where(NotificationRecipient.email == email)
+    )
+    if recipient is None:
+        raise HTTPException(status_code=404, detail="notification recipient not found")
+
+    recipient.is_active = request.is_active
+    session.commit()
+    session.refresh(recipient)
+    return _serialize_notification_recipient(recipient)
+
+
+@router.delete(
+    "/notification-recipients/{email}",
+    status_code=204,
+    responses=DELETE_NOTIFICATION_RECIPIENT_RESPONSES,
+)
+def delete_notification_recipient(
+    email: str,
+    session: Session = Depends(get_db_session),
+):
+    recipient = session.scalar(
+        select(NotificationRecipient).where(NotificationRecipient.email == email)
+    )
+    if recipient is None:
+        raise HTTPException(status_code=404, detail="notification recipient not found")
+
+    session.delete(recipient)
+    session.commit()

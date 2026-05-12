@@ -1,58 +1,73 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
 import { Mail, Bell, Plus, Trash2, CheckCircle2 } from 'lucide-react';
 import { USE_MOCK_DATA, apiClient } from '../api/config';
 
-interface EmailAlert {
-  id: string;
+interface NotificationRecipient {
   email: string;
-  active: boolean;
-  createdAt: string;
+  is_active: boolean;
+  created_at: string | null;
 }
 
-const mockAlerts: EmailAlert[] = [
-  { id: '1', email: 'admin@example.com', active: true, createdAt: '2026-04-20' },
-  { id: '2', email: 'manager@example.com', active: true, createdAt: '2026-04-21' },
+const NOTIFICATION_RECIPIENTS_ENDPOINT = '/notification-recipients';
+
+const mockRecipients: NotificationRecipient[] = [
+  { email: 'admin@example.com', is_active: true, created_at: '2026-04-20' },
+  { email: 'manager@example.com', is_active: true, created_at: '2026-04-21' },
 ];
+
+const formatCreatedAt = (createdAt: string | null) => {
+  if (!createdAt) return '-';
+  return createdAt.split('T')[0];
+};
 
 export const AlertsPage: React.FC = () => {
   const [email, setEmail] = useState('');
-  const [alerts, setAlerts] = useState<EmailAlert[]>(
-    USE_MOCK_DATA ? mockAlerts : []
+  const [recipients, setRecipients] = useState<NotificationRecipient[]>(
+    USE_MOCK_DATA ? mockRecipients : []
   );
   const [successMsg, setSuccessMsg] = useState('');
 
+  const fetchRecipients = useCallback(async () => {
+    const res = await apiClient.get<NotificationRecipient[]>(NOTIFICATION_RECIPIENTS_ENDPOINT);
+    setRecipients(res.data);
+  }, []);
+
   useEffect(() => {
     if (!USE_MOCK_DATA) {
-      apiClient.get('/alerts')
-        .then(res => setAlerts(res.data))
-        .catch(err => console.error('Failed to fetch alerts:', err));
+      apiClient.get<NotificationRecipient[]>(NOTIFICATION_RECIPIENTS_ENDPOINT)
+        .then(res => setRecipients(res.data))
+        .catch(err => console.error('Failed to fetch notification recipients:', err));
     }
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email) return;
 
-    const newAlert: EmailAlert = {
-      id: Date.now().toString(),
-      email,
-      active: true,
-      createdAt: new Date().toISOString().split('T')[0],
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) return;
+
+    const newRecipient: NotificationRecipient = {
+      email: trimmedEmail,
+      is_active: true,
+      created_at: new Date().toISOString().split('T')[0],
     };
 
     if (!USE_MOCK_DATA) {
       try {
-        const res = await apiClient.post('/alerts', { email });
-        setAlerts([...alerts, res.data]);
+        await apiClient.post(NOTIFICATION_RECIPIENTS_ENDPOINT, { emails: [trimmedEmail] });
+        await fetchRecipients();
         setSuccessMsg('이메일이 성공적으로 등록되었습니다.');
       } catch (error) {
-        console.error('Failed to add alert:', error);
+        console.error('Failed to add notification recipient:', error);
         alert('등록에 실패했습니다.');
         return;
       }
     } else {
-      setAlerts([...alerts, newAlert]);
+      setRecipients(prev => [
+        ...prev.filter(recipient => recipient.email !== trimmedEmail),
+        newRecipient,
+      ]);
       setSuccessMsg('이메일이 성공적으로 등록되었습니다.');
     }
 
@@ -60,37 +75,42 @@ export const AlertsPage: React.FC = () => {
     setTimeout(() => setSuccessMsg(''), 3000);
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (recipientEmail: string) => {
     if (!USE_MOCK_DATA) {
       try {
-        await apiClient.delete(`/alerts/${id}`);
-        setAlerts(alerts.filter(alert => alert.id !== id));
+        await apiClient.delete(`${NOTIFICATION_RECIPIENTS_ENDPOINT}/${encodeURIComponent(recipientEmail)}`);
+        setRecipients(prev => prev.filter(recipient => recipient.email !== recipientEmail));
       } catch (error) {
-        console.error('Failed to delete alert:', error);
+        console.error('Failed to delete notification recipient:', error);
         alert('삭제에 실패했습니다.');
       }
     } else {
-      setAlerts(alerts.filter(alert => alert.id !== id));
+      setRecipients(prev => prev.filter(recipient => recipient.email !== recipientEmail));
     }
   };
 
-  const toggleActive = async (id: string) => {
-    const alertToToggle = alerts.find(a => a.id === id);
-    if (!alertToToggle) return;
+  const toggleActive = async (recipientEmail: string) => {
+    const recipientToToggle = recipients.find(recipient => recipient.email === recipientEmail);
+    if (!recipientToToggle) return;
+
+    const nextIsActive = !recipientToToggle.is_active;
 
     if (!USE_MOCK_DATA) {
       try {
-        await apiClient.patch(`/alerts/${id}`, { active: !alertToToggle.active });
-        setAlerts(alerts.map(alert => 
-          alert.id === id ? { ...alert, active: !alert.active } : alert
+        await apiClient.patch(
+          `${NOTIFICATION_RECIPIENTS_ENDPOINT}/${encodeURIComponent(recipientEmail)}`,
+          { is_active: nextIsActive }
+        );
+        setRecipients(prev => prev.map(recipient =>
+          recipient.email === recipientEmail ? { ...recipient, is_active: nextIsActive } : recipient
         ));
       } catch (error) {
-        console.error('Failed to toggle alert:', error);
+        console.error('Failed to toggle notification recipient:', error);
         alert('상태 변경에 실패했습니다.');
       }
     } else {
-      setAlerts(alerts.map(alert => 
-        alert.id === id ? { ...alert, active: !alert.active } : alert
+      setRecipients(prev => prev.map(recipient =>
+        recipient.email === recipientEmail ? { ...recipient, is_active: nextIsActive } : recipient
       ));
     }
   };
@@ -152,44 +172,44 @@ export const AlertsPage: React.FC = () => {
             <CardTitle className="text-lg font-semibold text-slate-800 flex items-center justify-between">
               <span>등록된 이메일 목록</span>
               <span className="bg-blue-100 text-blue-700 text-xs px-2.5 py-1 rounded-full">
-                총 {alerts.length}개
+                총 {recipients.length}개
               </span>
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            {alerts.length === 0 ? (
+            {recipients.length === 0 ? (
               <div className="text-center py-12 text-slate-500">
                 <Mail size={48} className="mx-auto text-slate-300 mb-4" />
                 <p>등록된 이메일이 없습니다.</p>
               </div>
             ) : (
               <ul className="divide-y divide-slate-100">
-                {alerts.map((alert) => (
-                  <li key={alert.id} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors">
+                {recipients.map((recipient) => (
+                  <li key={recipient.email} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors">
                     <div className="flex items-center gap-4">
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center ${alert.active ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-400'}`}>
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center ${recipient.is_active ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-400'}`}>
                         <Mail size={20} />
                       </div>
                       <div>
-                        <p className={`font-medium ${alert.active ? 'text-slate-900' : 'text-slate-500 line-through'}`}>
-                          {alert.email}
+                        <p className={`font-medium ${recipient.is_active ? 'text-slate-900' : 'text-slate-500 line-through'}`}>
+                          {recipient.email}
                         </p>
-                        <p className="text-xs text-slate-500">등록일: {alert.createdAt}</p>
+                        <p className="text-xs text-slate-500">등록일 {formatCreatedAt(recipient.created_at)}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       <button
-                        onClick={() => toggleActive(alert.id)}
+                        onClick={() => toggleActive(recipient.email)}
                         className={`px-3 py-1 text-xs font-medium rounded-full border transition-colors ${
-                          alert.active 
-                            ? 'border-green-200 bg-green-50 text-green-700 hover:bg-green-100' 
+                          recipient.is_active
+                            ? 'border-green-200 bg-green-50 text-green-700 hover:bg-green-100'
                             : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
                         }`}
                       >
-                        {alert.active ? '수신 중' : '수신 거부'}
+                        {recipient.is_active ? '수신 중' : '수신 거부'}
                       </button>
                       <button
-                        onClick={() => handleDelete(alert.id)}
+                        onClick={() => handleDelete(recipient.email)}
                         className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                         title="삭제"
                       >

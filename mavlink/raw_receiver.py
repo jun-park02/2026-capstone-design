@@ -148,14 +148,15 @@ def health():
 async def upload_fire_detection(
     request: Request,
     image: UploadFile = File(...),
-    event_id: str | None = Form(None),
-    image_id: str | None = Form(None),
-    captured_at: str | None = Form(None),
-    lat: str | None = Form(None),
-    lon: str | None = Form(None),
-    alt: str | None = Form(None),
-    confidence: str | None = Form(None),
-    image_format: str | None = Form(None),
+    event_id: str | None = Form(None, examples=["fire-test-001"]),
+    image_id: str | None = Form(None, examples=["img-test-001"]),
+    captured_at: str | None = Form(None, examples=["2026-04-28T12:30:00"]),
+    lat: str | None = Form(None, examples=["37.5665"]),
+    lon: str | None = Form(None, examples=["126.9780"]),
+    alt: str | None = Form(None, examples=["120.5"]),
+    confidence: str | None = Form(None, examples=["0.92"]),
+    system_id: str | None = Form(None, examples=["1"]),
+    image_format: str | None = Form(None, examples=["jpg"]),
 ):
     image_ext = normalize_image_format(image_format, image.filename, image.content_type)
     normalized_event_id = safe_id(event_id or f"fire-{int(time.time() * 1000)}")
@@ -179,6 +180,7 @@ async def upload_fire_detection(
         "lon": lon,
         "alt": alt,
         "confidence": confidence,
+        "system_id": system_id,
         "image_format": image_ext,
         "chunk_total": 1,
         "image_name": image_name,

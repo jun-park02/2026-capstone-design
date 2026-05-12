@@ -49,6 +49,33 @@ def _fire_image_url(event: FireEvent) -> str | None:
     return None
 
 
+def _detected_drone(event: FireEvent) -> dict:
+    payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+    system_id = payload.get("system_id") or payload.get("src_system_id")
+    return {
+        "system_id": system_id,
+        "src_ip": event.src_ip,
+        "src_port": event.src_port,
+    }
+
+
+def _serialize_fire_event_detail(event: FireEvent) -> dict:
+    occurred_at = event.captured_at or event.received_at
+    return {
+        "event_id": event.event_id,
+        "occurred_at": _serialize_datetime(occurred_at),
+        "location": {
+            "lat": _to_float(event.lat),
+            "lon": _to_float(event.lon),
+            "alt": _to_float(event.alt),
+        },
+        "detected_drone": _detected_drone(event),
+        "confidence": _to_float(event.confidence),
+        "image_url": _fire_image_url(event),
+        "in_progress": event.user_confirmation is None,
+    }
+
+
 def _serialize_fire_event(event: FireEvent) -> dict:
     return {
         "event_id": event.event_id,
@@ -211,6 +238,171 @@ def get_today_fire_confirmed_event_count(
         "count": count,
         "tz_offset_hours": tz_offset_hours,
     }
+
+
+def _count_fire_events_between(
+    session: Session,
+    start_at: datetime,
+    end_at: datetime,
+    confirmed_only: bool = False,
+) -> int:
+    stmt = (
+        select(func.count(FireEvent.id))
+        .select_from(FireEvent)
+        .where(FireEvent.received_at >= start_at, FireEvent.received_at < end_at)
+    )
+    if confirmed_only:
+        stmt = stmt.where(FireEvent.user_confirmation == "Y")
+    return session.scalar(stmt) or 0
+
+
+@router.get(
+    "/fire-events/recent-statistics",
+    responses={
+        200: {
+            "description": "Recent fire detection statistics for year, month, and week windows.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "ok": True,
+                        "evaluated_at": "2026-04-28T12:00:00Z",
+                        "basis": {
+                            "time_field": "received_at",
+                            "actual_fire_condition": "user_confirmation == 'Y'",
+                        },
+                        "last_year": {
+                            "label": "recent_365_days",
+                            "start_at": "2025-04-28T12:00:00",
+                            "end_at": "2026-04-28T12:00:00",
+                            "total_detection_count": 120,
+                        },
+                        "last_month": {
+                            "label": "recent_30_days",
+                            "start_at": "2026-03-29T12:00:00",
+                            "end_at": "2026-04-28T12:00:00",
+                            "total_detection_count": 18,
+                            "actual_fire_count": 5,
+                        },
+                        "last_week": {
+                            "label": "recent_7_days",
+                            "start_at": "2026-04-21T12:00:00",
+                            "end_at": "2026-04-28T12:00:00",
+                            "total_detection_count": 6,
+                            "actual_fire_count": 2,
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+def get_recent_fire_statistics(session: Session = Depends(get_db_session)):
+    """
+    Return rolling fire event statistics in one response.
+
+    - last_year: total detection count for the recent 365 days
+    - last_month: total detection count and actual fire count for the recent 30 days
+    - last_week: total detection count and actual fire count for the recent 7 days
+    """
+    evaluated_at = datetime.utcnow()
+    windows = {
+        "last_year": ("recent_365_days", evaluated_at - timedelta(days=365)),
+        "last_month": ("recent_30_days", evaluated_at - timedelta(days=30)),
+        "last_week": ("recent_7_days", evaluated_at - timedelta(days=7)),
+    }
+
+    last_year_label, last_year_start = windows["last_year"]
+    last_month_label, last_month_start = windows["last_month"]
+    last_week_label, last_week_start = windows["last_week"]
+
+    return {
+        "ok": True,
+        "evaluated_at": evaluated_at.isoformat() + "Z",
+        "basis": {
+            "time_field": "received_at",
+            "actual_fire_condition": "user_confirmation == 'Y'",
+        },
+        "last_year": {
+            "label": last_year_label,
+            "start_at": last_year_start.isoformat(),
+            "end_at": evaluated_at.isoformat(),
+            "total_detection_count": _count_fire_events_between(
+                session=session,
+                start_at=last_year_start,
+                end_at=evaluated_at,
+            ),
+        },
+        "last_month": {
+            "label": last_month_label,
+            "start_at": last_month_start.isoformat(),
+            "end_at": evaluated_at.isoformat(),
+            "total_detection_count": _count_fire_events_between(
+                session=session,
+                start_at=last_month_start,
+                end_at=evaluated_at,
+            ),
+            "actual_fire_count": _count_fire_events_between(
+                session=session,
+                start_at=last_month_start,
+                end_at=evaluated_at,
+                confirmed_only=True,
+            ),
+        },
+        "last_week": {
+            "label": last_week_label,
+            "start_at": last_week_start.isoformat(),
+            "end_at": evaluated_at.isoformat(),
+            "total_detection_count": _count_fire_events_between(
+                session=session,
+                start_at=last_week_start,
+                end_at=evaluated_at,
+            ),
+            "actual_fire_count": _count_fire_events_between(
+                session=session,
+                start_at=last_week_start,
+                end_at=evaluated_at,
+                confirmed_only=True,
+            ),
+        },
+    }
+
+
+@router.get(
+    "/fire-events/recent-year/actual-fire-ratio",
+    responses={
+        200: {
+            "description": "Actual fire ratio among all detected fire events for the recent 365 days.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "ratio": 0.25,
+                    }
+                }
+            },
+        }
+    },
+)
+def get_recent_year_actual_fire_ratio(session: Session = Depends(get_db_session)):
+    """
+    Return the recent 365-day ratio requested as:
+    actual fire count / total detected fire count * 100.
+    """
+    evaluated_at = datetime.utcnow()
+    start_at = evaluated_at - timedelta(days=365)
+    total_detection_count = _count_fire_events_between(
+        session=session,
+        start_at=start_at,
+        end_at=evaluated_at,
+    )
+    actual_fire_count = _count_fire_events_between(
+        session=session,
+        start_at=start_at,
+        end_at=evaluated_at,
+        confirmed_only=True,
+    )
+    ratio = actual_fire_count / total_detection_count if total_detection_count > 0 else 0
+
+    return {"ratio": ratio}
 
 
 @router.get("/fire-events/today/with-telemetry")
@@ -396,3 +588,43 @@ def get_current_fire_event_status(
             "pending_suspected_count": pending_suspected_count,
         },
     }
+
+
+@router.get(
+    "/fire-events/{event_id}",
+    responses={
+        200: {
+            "description": "Fire event detail.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "event_id": "fire-1714287600000",
+                        "occurred_at": "2026-04-28T12:00:00",
+                        "location": {
+                            "lat": 37.5665,
+                            "lon": 126.978,
+                            "alt": 120.5,
+                        },
+                        "detected_drone": {
+                            "system_id": 1,
+                            "src_ip": "192.168.0.10",
+                            "src_port": 14550,
+                        },
+                        "confidence": 0.92,
+                        "image_url": "https://example-bucket.s3.amazonaws.com/fire/fire-1714287600000.jpg",
+                        "in_progress": True,
+                    }
+                }
+            },
+        },
+        404: {"description": "Fire event not found."},
+    },
+)
+def get_fire_event_detail(
+    event_id: str,
+    session: Session = Depends(get_db_session),
+):
+    event = session.scalar(select(FireEvent).where(FireEvent.event_id == event_id))
+    if event is None:
+        raise HTTPException(status_code=404, detail="fire event not found")
+    return _serialize_fire_event_detail(event)

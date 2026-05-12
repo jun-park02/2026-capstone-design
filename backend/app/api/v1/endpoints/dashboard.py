@@ -114,7 +114,46 @@ def list_dashboard_aggregates(
     }
 
 
-@router.get("/dashboard/aggregates/ratio")
+@router.get(
+    "/dashboard/aggregates/ratio",
+    responses={
+        200: {
+            "description": "Ratio between two dashboard aggregate metrics.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "ok": True,
+                        "aggregate_date": "2026-04-28",
+                        "numerator": {
+                            "id": 2,
+                            "aggregate_date": "2026-04-28",
+                            "metric_key": "fire_confirmed_events",
+                            "metric_value": 4.0,
+                            "metric_unit": "count",
+                            "description": "Confirmed fire events today.",
+                            "extra": None,
+                            "created_at": "2026-04-28T00:00:00",
+                            "updated_at": "2026-04-28T00:05:00",
+                        },
+                        "denominator": {
+                            "id": 1,
+                            "aggregate_date": "2026-04-28",
+                            "metric_key": "total_fire_events",
+                            "metric_value": 12.0,
+                            "metric_unit": "count",
+                            "description": "Total fire detection events today.",
+                            "extra": None,
+                            "created_at": "2026-04-28T00:00:00",
+                            "updated_at": "2026-04-28T00:05:00",
+                        },
+                        "ratio": 0.3333333333333333,
+                        "percentage": 33.33333333333333,
+                    }
+                }
+            },
+        }
+    },
+)
 def get_dashboard_aggregate_ratio(
     numerator_key: str = Query(..., min_length=1, max_length=100),
     denominator_key: str = Query(..., min_length=1, max_length=100),
