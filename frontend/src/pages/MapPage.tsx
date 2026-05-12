@@ -6,11 +6,14 @@ import L from 'leaflet';
 import { USE_MOCK_DATA, apiClient } from '../api/config';
 
 // Icons
+const DRONE_ICON_URL = '/icons/drone.svg';
+
 const droneIcon = new L.Icon({
-  iconUrl: 'https://cdn-icons-png.flaticon.com/512/2855/2855018.png', // Example drone icon
-  iconSize: [32, 32],
-  iconAnchor: [16, 16],
-  popupAnchor: [0, -16],
+  iconUrl: DRONE_ICON_URL,
+  iconSize: [44, 44],
+  iconAnchor: [22, 22],
+  popupAnchor: [0, -22],
+  className: 'drone-map-icon',
 });
 
 const fireIcon = new L.Icon({
@@ -71,7 +74,7 @@ export const MapPage: React.FC = () => {
         <h2 className="text-2xl font-bold tracking-tight text-slate-900">실시간 지도</h2>
         <div className="flex gap-2">
           <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-md shadow-sm border border-slate-200 text-sm">
-            <img src={droneIcon.options.iconUrl} alt="drone" className="w-4 h-4" />
+            <img src={DRONE_ICON_URL} alt="drone" className="w-4 h-4" />
             <span>드론 ({drones.length})</span>
           </div>
           <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-md shadow-sm border border-slate-200 text-sm">
