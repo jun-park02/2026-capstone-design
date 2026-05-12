@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, ZoomControl } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, ZoomControl } from 'react-leaflet';
 import { Card, CardContent } from '../components/ui/Card';
 import { Navigation, Flame, Battery } from 'lucide-react';
 import L from 'leaflet';
@@ -36,10 +36,60 @@ const mockFires = [
   { id: 'FIRE-02', lat: 37.5550, lng: 126.9700, time: '12:15', status: '확인됨' },
 ];
 
+type Drone = typeof mockDrones[number];
+type DronePathPoint = [number, number];
+type DronePaths = Record<string, DronePathPoint[]>;
+
+const MAX_DRONE_PATH_POINTS = 40;
+const DRONE_PATH_COLORS = ['#2563eb', '#0f766e', '#f97316', '#7c3aed', '#db2777'];
+
+const mockDronePaths: DronePaths = {
+  'DRN-01': [
+    [37.5628, 126.9705],
+    [37.5641, 126.9728],
+    [37.5654, 126.9754],
+    [37.5665, 126.9780],
+  ],
+  'DRN-02': [
+    [37.5758, 126.9885],
+    [37.5739, 126.9861],
+    [37.5718, 126.9840],
+    [37.5700, 126.9820],
+  ],
+  'DRN-03': [
+    [37.5526, 126.9948],
+    [37.5550, 126.9935],
+    [37.5576, 126.9917],
+    [37.5600, 126.9900],
+  ],
+};
+
+const getDronePathColor = (index: number) => DRONE_PATH_COLORS[index % DRONE_PATH_COLORS.length];
+
+const appendDronePositions = (previousPaths: DronePaths, nextDrones: Drone[]) => {
+  const nextPaths: DronePaths = {};
+
+  nextDrones.forEach((drone) => {
+    const nextPoint: DronePathPoint = [drone.lat, drone.lng];
+    const previousPoints = previousPaths[drone.id] ?? [];
+    const lastPoint = previousPoints[previousPoints.length - 1];
+    const hasSameLastPoint = lastPoint?.[0] === nextPoint[0] && lastPoint?.[1] === nextPoint[1];
+
+    nextPaths[drone.id] = hasSameLastPoint
+      ? previousPoints
+      : [...previousPoints, nextPoint].slice(-MAX_DRONE_PATH_POINTS);
+  });
+
+  return nextPaths;
+};
+
 export const MapPage: React.FC = () => {
   const [activeDrone, setActiveDrone] = useState<string | null>(null);
-  const [drones, setDrones] = useState<typeof mockDrones>(
+  const [drones, setDrones] = useState<Drone[]>(
     USE_MOCK_DATA ? mockDrones : []
+  );
+  const [dronePaths, setDronePaths] = useState<DronePaths>(
+    USE_MOCK_DATA ? mockDronePaths : {}
   );
   const [fires, setFires] = useState<typeof mockFires>(
     USE_MOCK_DATA ? mockFires : []
@@ -53,7 +103,9 @@ export const MapPage: React.FC = () => {
             apiClient.get('/drones'),
             apiClient.get('/fires/active')
           ]);
-          setDrones(dronesRes.data);
+          const nextDrones = dronesRes.data as Drone[];
+          setDrones(nextDrones);
+          setDronePaths(previousPaths => appendDronePositions(previousPaths, nextDrones));
           setFires(firesRes.data);
         } catch (error) {
           console.error('Failed to fetch map data:', error);
@@ -130,6 +182,27 @@ export const MapPage: React.FC = () => {
               url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
             />
             <ZoomControl position="bottomright" />
+
+            {/* Drone paths */}
+            {drones.map((drone, index) => {
+              const path = dronePaths[drone.id] ?? [];
+              const isActive = activeDrone === drone.id;
+
+              if (path.length < 2) return null;
+
+              return (
+                <Polyline
+                  key={`${drone.id}-path`}
+                  positions={path}
+                  pathOptions={{
+                    color: getDronePathColor(index),
+                    weight: isActive ? 5 : 3,
+                    opacity: isActive ? 0.9 : 0.6,
+                    dashArray: isActive ? undefined : '6 8',
+                  }}
+                />
+              );
+            })}
 
             {/* Drones */}
             {drones.map(drone => (
