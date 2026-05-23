@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap } from 'react-leaflet';
@@ -70,11 +70,14 @@ type Coordinate = [number, number];
 
 const MapAutoFit: React.FC<{ points: Coordinate[] }> = ({ points }) => {
   const map = useMap();
+  const hasFitInitialView = useRef(false);
 
   useEffect(() => {
-    if (points.length === 0) {
+    if (hasFitInitialView.current || points.length === 0) {
       return;
     }
+
+    hasFitInitialView.current = true;
 
     if (points.length === 1) {
       map.setView(points[0], 14);

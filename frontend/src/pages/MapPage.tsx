@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, ZoomControl, useMap } from 'react-leaflet';
 import { Card, CardContent } from '../components/ui/Card';
 import { Navigation, Flame, Battery } from 'lucide-react';
@@ -223,11 +223,14 @@ const transformOverview = (overview: MapOverviewResponse) => {
 
 const MapAutoFit: React.FC<{ points: Coordinate[] }> = ({ points }) => {
   const map = useMap();
+  const hasFitInitialView = useRef(false);
 
   useEffect(() => {
-    if (points.length === 0) {
+    if (hasFitInitialView.current || points.length === 0) {
       return;
     }
+
+    hasFitInitialView.current = true;
 
     if (points.length === 1) {
       map.setView(points[0], 14);

@@ -1,4 +1,5 @@
 from pymavlink.dialects.v20 import common as mavlink2
+import math
 import os
 import socket
 import time
@@ -10,6 +11,12 @@ MAVLINK_SYS_ID = int(os.getenv("MAVLINK_SYS_ID", "1"))
 MAVLINK_COMP_ID = int(os.getenv("MAVLINK_COMP_ID", "1"))
 POSITION_OFFSET = float(os.getenv("POSITION_OFFSET", "0"))
 ALT_OFFSET = float(os.getenv("ALT_OFFSET", "0"))
+MOVEMENT_MODE = os.getenv("MOVEMENT_MODE", "linear").lower()
+LINEAR_STEP = float(os.getenv("LINEAR_STEP", "0.0001"))
+ALT_STEP = float(os.getenv("ALT_STEP", "0.5"))
+CIRCLE_RADIUS_METERS = float(os.getenv("CIRCLE_RADIUS_METERS", "250"))
+CIRCLE_PERIOD_STEPS = max(1, int(os.getenv("CIRCLE_PERIOD_STEPS", "120")))
+CIRCLE_START_DEGREES = float(os.getenv("CIRCLE_START_DEGREES", "0"))
 
 mav.srcSystem = MAVLINK_SYS_ID
 mav.srcComponent = MAVLINK_COMP_ID
@@ -17,6 +24,10 @@ mav.srcComponent = MAVLINK_COMP_ID
 # 환경 변수에서 대상 IP/포트를 가져오기
 TARGET_IP = os.getenv("TARGET_IP", "udp-rx")
 TARGET_PORT = int(os.getenv("TARGET_PORT", "14550"))
+BASE_LAT = float(os.getenv("BASE_LAT", "37.5665"))
+BASE_LON = float(os.getenv("BASE_LON", "126.9780"))
+BASE_ALT = float(os.getenv("BASE_ALT", "50.0"))
+METERS_PER_DEGREE_LAT = 111_320
 
 
 def send_udp(payload: bytes, ip=None, port=None):
@@ -30,11 +41,38 @@ def send_udp(payload: bytes, ip=None, port=None):
     sock.close()
 
 
+def meters_to_lon_degrees(meters: float, latitude: float) -> float:
+    scale = METERS_PER_DEGREE_LAT * math.cos(math.radians(latitude))
+    if abs(scale) < 1e-9:
+        return 0
+    return meters / scale
+
+
+def get_position(seq: int):
+    center_lat = BASE_LAT + POSITION_OFFSET
+    center_lon = BASE_LON + POSITION_OFFSET
+
+    if MOVEMENT_MODE == "circle":
+        angle = math.radians(CIRCLE_START_DEGREES) + (
+            2 * math.pi * (seq % CIRCLE_PERIOD_STEPS) / CIRCLE_PERIOD_STEPS
+        )
+        lat = center_lat + (math.cos(angle) * CIRCLE_RADIUS_METERS / METERS_PER_DEGREE_LAT)
+        lon = center_lon + (math.sin(angle) * meters_to_lon_degrees(CIRCLE_RADIUS_METERS, center_lat))
+        alt = BASE_ALT + ALT_OFFSET
+        return lat, lon, alt
+
+    lat = center_lat + (seq * LINEAR_STEP)
+    lon = center_lon + (seq * LINEAR_STEP)
+    alt = BASE_ALT + ALT_OFFSET + (seq * ALT_STEP)
+    return lat, lon, alt
+
+
 def main():
     seq = 0
     print(
         f"[TX] sysid={MAVLINK_SYS_ID}, compid={MAVLINK_COMP_ID}, "
-        f"target={TARGET_IP}:{TARGET_PORT}, position_offset={POSITION_OFFSET}, alt_offset={ALT_OFFSET}"
+        f"target={TARGET_IP}:{TARGET_PORT}, position_offset={POSITION_OFFSET}, "
+        f"alt_offset={ALT_OFFSET}, movement_mode={MOVEMENT_MODE}"
     )
 
     while True:
@@ -59,9 +97,7 @@ def main():
         send_udp(att.pack(mav))
 
         # 위치 정보는 드론별 오프셋과 seq 기반으로 조금씩 변화시킨다.
-        lat = 37.5665 + POSITION_OFFSET + (seq * 0.0001)
-        lon = 126.9780 + POSITION_OFFSET + (seq * 0.0001)
-        alt = 50.0 + ALT_OFFSET + (seq * 0.5)
+        lat, lon, alt = get_position(seq)
 
         global_pos = mav.global_position_int_encode(
             time_boot_ms=int(time.time() * 1000) & 0xFFFFFFFF,
