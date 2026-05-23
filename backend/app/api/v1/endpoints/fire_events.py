@@ -2,6 +2,7 @@ from datetime import UTC, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,10 @@ from app.models import DroneTelemetry, FireEvent, FireEventEmailNotification
 
 
 router = APIRouter(tags=["fire-events"])
+
+
+class FireEventStatusUpdate(BaseModel):
+    status: str
 
 
 def _day_bounds_utc(tz_offset_hours: int = 9) -> tuple[datetime, datetime, str]:
@@ -40,6 +45,17 @@ def _fire_event_status(event: FireEvent) -> str:
     if event.user_confirmation == "N":
         return "reviewed"
     return "pending"
+
+
+def _status_to_confirmation(status: str) -> str | None:
+    normalized = status.strip().lower()
+    if normalized in {"확인됨", "confirmed", "fire_confirmed", "real_fire", "y"}:
+        return "Y"
+    if normalized in {"오탐지", "rejected", "reviewed", "false_positive", "n"}:
+        return "N"
+    if normalized in {"진행중", "pending", "in_progress"}:
+        return None
+    raise ValueError("status must be one of 진행중, 확인됨, 오탐지")
 
 
 def _fire_image_url(event: FireEvent) -> str | None:
@@ -168,6 +184,30 @@ def send_fire_event_confirmation_emails(
 
     result = send_confirmation_emails_for_event(session, event, force_resend=force_resend)
     return {"ok": True, "event_id": event.event_id, **result}
+
+
+@router.get("/fire-events")
+def list_fire_events(
+    limit: int = Query(100, ge=1, le=1000),
+    confirmation: str = Query("all", pattern="^(all|pending|confirmed|rejected)$"),
+    session: Session = Depends(get_db_session),
+):
+    """Return fire events for the frontend detail page."""
+    stmt = select(FireEvent).order_by(FireEvent.received_at.desc(), FireEvent.id.desc()).limit(limit)
+    if confirmation == "pending":
+        stmt = stmt.where(FireEvent.user_confirmation.is_(None))
+    elif confirmation == "confirmed":
+        stmt = stmt.where(FireEvent.user_confirmation == "Y")
+    elif confirmation == "rejected":
+        stmt = stmt.where(FireEvent.user_confirmation == "N")
+
+    events = session.scalars(stmt).all()
+    return {
+        "ok": True,
+        "confirmation": confirmation,
+        "count": len(events),
+        "items": [_serialize_fire_event(event) for event in events],
+    }
 
 
 @router.get("/fire-events/pending")
@@ -588,6 +628,37 @@ def get_current_fire_event_status(
             "pending_suspected_count": pending_suspected_count,
         },
     }
+
+
+@router.patch("/fire-events/{event_id}")
+def update_fire_event_status(
+    event_id: str,
+    update: FireEventStatusUpdate,
+    session: Session = Depends(get_db_session),
+):
+    try:
+        confirmation = _status_to_confirmation(update.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    event = session.scalar(select(FireEvent).where(FireEvent.event_id == event_id))
+    if event is None:
+        raise HTTPException(status_code=404, detail="fire event not found")
+
+    event.user_confirmation = confirmation
+    if confirmation is None:
+        event.user_confirmed_at = None
+        event.user_confirmed_by_email = None
+    else:
+        event.user_confirmed_at = datetime.utcnow()
+        event.user_confirmed_by_email = "dashboard"
+
+    session.add(event)
+    session.commit()
+    session.refresh(event)
+    sync_cached_confirmation(event)
+
+    return {"ok": True, "item": _serialize_fire_event(event)}
 
 
 @router.get(

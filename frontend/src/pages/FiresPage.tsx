@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
 import { Flame, MapPin, Calendar, Clock, AlertTriangle, Search, Filter } from 'lucide-react';
 import { USE_MOCK_DATA, apiClient } from '../api/config';
+
+type FireStatus = '진행중' | '확인됨' | '오탐지';
 
 interface FireEvent {
   id: string;
@@ -10,9 +12,41 @@ interface FireEvent {
   location: string;
   lat: number;
   lng: number;
-  status: '진행중' | '확인됨' | '오탐지';
+  status: FireStatus;
   droneId: string;
   confidence: number;
+  imageUrl?: string | null;
+}
+
+interface BackendFireEvent {
+  event_id: string;
+  status?: string | null;
+  received_at?: string | null;
+  captured_at?: string | null;
+  lat?: number | string | null;
+  lon?: number | string | null;
+  alt?: number | string | null;
+  confidence?: number | string | null;
+  image_url?: string | null;
+  user_confirmation?: string | null;
+}
+
+interface BackendFireEventDetail {
+  event_id: string;
+  occurred_at?: string | null;
+  location?: {
+    lat?: number | string | null;
+    lon?: number | string | null;
+    alt?: number | string | null;
+  } | null;
+  detected_drone?: {
+    system_id?: number | string | null;
+    src_ip?: string | null;
+    src_port?: number | string | null;
+  } | null;
+  confidence?: number | string | null;
+  image_url?: string | null;
+  in_progress?: boolean;
 }
 
 const mockFires: FireEvent[] = [
@@ -23,25 +57,138 @@ const mockFires: FireEvent[] = [
   { id: 'EVT-20260422-01', date: '2026-04-22', time: '11:10:30', location: '수락산 계곡', lat: 37.4500, lng: 126.9550, status: '확인됨', droneId: 'DRN-02', confidence: 88 },
 ];
 
+const toNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+};
+
+const splitDateTime = (value?: string | null) => {
+  if (!value) {
+    return { date: '-', time: '-' };
+  }
+
+  const [date, time = ''] = value.includes('T') ? value.split('T') : value.split(' ');
+  return {
+    date: date || '-',
+    time: time ? time.slice(0, 8) : '-',
+  };
+};
+
+const toPercent = (value: unknown) => {
+  const numberValue = toNumber(value);
+  if (numberValue === null) {
+    return 0;
+  }
+
+  return Math.round(numberValue <= 1 ? numberValue * 100 : numberValue);
+};
+
+const toFireStatus = (status?: string | null, confirmation?: string | null): FireStatus => {
+  if (confirmation === 'Y' || status === 'confirmed' || status === 'fire_confirmed') {
+    return '확인됨';
+  }
+  if (confirmation === 'N' || status === 'rejected' || status === 'reviewed') {
+    return '오탐지';
+  }
+  return '진행중';
+};
+
+const locationLabel = (lat: number, lng: number) => `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+
+const transformFireEvent = (event: BackendFireEvent): FireEvent | null => {
+  const lat = toNumber(event.lat);
+  const lng = toNumber(event.lon);
+  if (lat === null || lng === null) {
+    return null;
+  }
+
+  const occurredAt = event.captured_at ?? event.received_at;
+  const { date, time } = splitDateTime(occurredAt);
+
+  return {
+    id: event.event_id,
+    date,
+    time,
+    location: locationLabel(lat, lng),
+    lat,
+    lng,
+    status: toFireStatus(event.status, event.user_confirmation),
+    droneId: '-',
+    confidence: toPercent(event.confidence),
+    imageUrl: event.image_url,
+  };
+};
+
+const mergeFireDetail = (fire: FireEvent, detail: BackendFireEventDetail): FireEvent => {
+  const lat = toNumber(detail.location?.lat) ?? fire.lat;
+  const lng = toNumber(detail.location?.lon) ?? fire.lng;
+  const { date, time } = splitDateTime(detail.occurred_at ?? `${fire.date}T${fire.time}`);
+  const systemId = detail.detected_drone?.system_id;
+
+  return {
+    ...fire,
+    date,
+    time,
+    lat,
+    lng,
+    location: locationLabel(lat, lng),
+    droneId: systemId === null || systemId === undefined || systemId === '' ? '-' : `Drone-${systemId}`,
+    confidence: toPercent(detail.confidence),
+    imageUrl: detail.image_url ?? fire.imageUrl,
+    status: detail.in_progress === true ? '진행중' : fire.status,
+  };
+};
+
 export const FiresPage: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('전체');
   const [selectedFire, setSelectedFire] = useState<FireEvent | null>(null);
-  const [fires, setFires] = useState<FireEvent[]>(
-    USE_MOCK_DATA ? mockFires : []
-  );
+  const [fires, setFires] = useState<FireEvent[]>(USE_MOCK_DATA ? mockFires : []);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!USE_MOCK_DATA) {
-      apiClient.get('/fires')
-        .then(res => setFires(res.data))
-        .catch(err => console.error('Failed to fetch fires:', err));
+    if (USE_MOCK_DATA) {
+      return;
     }
+
+    apiClient.get<{ items: BackendFireEvent[] }>('/fire-events')
+      .then((res) => {
+        const nextFires = (res.data.items ?? [])
+          .map(transformFireEvent)
+          .filter((fire): fire is FireEvent => fire !== null);
+        setFires(nextFires);
+        setLoadError(null);
+      })
+      .catch((err) => {
+        console.error('Failed to fetch fire events:', err);
+        setLoadError('화재 이벤트를 불러오지 못했습니다.');
+      });
   }, []);
 
-  const filteredFires = fires.filter(fire => {
-    const matchesSearch = fire.id.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          fire.location.toLowerCase().includes(searchTerm.toLowerCase());
+  const handleSelectFire = async (fire: FireEvent) => {
+    setSelectedFire(fire);
+
+    if (USE_MOCK_DATA) {
+      return;
+    }
+
+    try {
+      const res = await apiClient.get<BackendFireEventDetail>(`/fire-events/${encodeURIComponent(fire.id)}`);
+      const detailedFire = mergeFireDetail(fire, res.data);
+      setSelectedFire((current) => (current?.id === fire.id ? detailedFire : current));
+      setFires((currentFires) => currentFires.map((item) => (item.id === fire.id ? detailedFire : item)));
+    } catch (error) {
+      console.error('Failed to fetch fire event detail:', error);
+    }
+  };
+
+  const filteredFires = fires.filter((fire) => {
+    const matchesSearch = fire.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      fire.location.toLowerCase().includes(searchTerm.toLowerCase());
     const matchesStatus = filterStatus === '전체' || fire.status === filterStatus;
     return matchesSearch && matchesStatus;
   });
@@ -59,23 +206,20 @@ export const FiresPage: React.FC = () => {
     }
   };
 
-  const handleUpdateStatus = async (id: string, newStatus: string) => {
+  const handleUpdateStatus = async (id: string, newStatus: FireStatus) => {
     if (!USE_MOCK_DATA) {
       try {
-        await apiClient.patch(`/fires/${id}`, { status: newStatus });
-        setFires(fires.map(f => f.id === id ? { ...f, status: newStatus as any } : f));
-        if (selectedFire?.id === id) {
-          setSelectedFire({ ...selectedFire, status: newStatus as any });
-        }
+        await apiClient.patch(`/fire-events/${encodeURIComponent(id)}`, { status: newStatus });
       } catch (error) {
         console.error('Failed to update fire status:', error);
         alert('상태 업데이트에 실패했습니다.');
+        return;
       }
-    } else {
-      setFires(fires.map(f => f.id === id ? { ...f, status: newStatus as any } : f));
-      if (selectedFire?.id === id) {
-        setSelectedFire({ ...selectedFire, status: newStatus as any });
-      }
+    }
+
+    setFires((currentFires) => currentFires.map((fire) => fire.id === id ? { ...fire, status: newStatus } : fire));
+    if (selectedFire?.id === id) {
+      setSelectedFire({ ...selectedFire, status: newStatus });
     }
   };
 
@@ -83,7 +227,8 @@ export const FiresPage: React.FC = () => {
     <div className="space-y-6 h-[calc(100vh-6rem)] flex flex-col">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold tracking-tight text-slate-900">화재 세부 조회</h2>
-        <div className="flex gap-3">
+        <div className="flex items-center gap-3">
+          {loadError && <span className="text-sm text-red-600">{loadError}</span>}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
             <input
@@ -111,7 +256,6 @@ export const FiresPage: React.FC = () => {
       </div>
 
       <div className="flex-1 flex gap-6 overflow-hidden">
-        {/* 화재 목록 */}
         <Card className="w-1/2 flex flex-col overflow-hidden">
           <CardHeader className="bg-slate-50 border-b border-slate-100 py-4">
             <CardTitle className="text-lg font-semibold text-slate-800 flex justify-between items-center">
@@ -123,10 +267,10 @@ export const FiresPage: React.FC = () => {
           </CardHeader>
           <CardContent className="flex-1 overflow-y-auto p-0">
             <ul className="divide-y divide-slate-100">
-              {filteredFires.map(fire => (
-                <li 
+              {filteredFires.map((fire) => (
+                <li
                   key={fire.id}
-                  onClick={() => setSelectedFire(fire)}
+                  onClick={() => handleSelectFire(fire)}
                   className={`p-4 cursor-pointer hover:bg-slate-50 transition-colors ${selectedFire?.id === fire.id ? 'bg-blue-50 border-l-4 border-blue-500' : 'border-l-4 border-transparent'}`}
                 >
                   <div className="flex justify-between items-start mb-2">
@@ -138,7 +282,7 @@ export const FiresPage: React.FC = () => {
                     <div className="flex items-center gap-1.5"><Calendar size={14} className="text-slate-400" /> {fire.date}</div>
                     <div className="flex items-center gap-1.5"><Clock size={14} className="text-slate-400" /> {fire.time}</div>
                     <div className="flex items-center gap-1.5">
-                      <AlertTriangle size={14} className={fire.confidence > 90 ? 'text-red-500' : 'text-orange-500'} /> 
+                      <AlertTriangle size={14} className={fire.confidence > 90 ? 'text-red-500' : 'text-orange-500'} />
                       신뢰도: {fire.confidence}%
                     </div>
                   </div>
@@ -154,7 +298,6 @@ export const FiresPage: React.FC = () => {
           </CardContent>
         </Card>
 
-        {/* 화재 세부 정보 */}
         <Card className="w-1/2 flex flex-col overflow-hidden bg-slate-50">
           {selectedFire ? (
             <>
@@ -170,7 +313,7 @@ export const FiresPage: React.FC = () => {
                     <h3 className="text-xl font-bold text-slate-900">{selectedFire.id}</h3>
                     {getStatusBadge(selectedFire.status)}
                   </div>
-                  
+
                   <div className="grid grid-cols-2 gap-6">
                     <div className="space-y-4">
                       <div>
@@ -189,12 +332,12 @@ export const FiresPage: React.FC = () => {
                         </div>
                       </div>
                     </div>
-                    
+
                     <div className="space-y-4">
                       <div>
                         <div className="text-sm text-slate-500 mb-1">탐지 드론</div>
                         <div className="font-medium text-slate-800 flex items-center gap-2">
-                          <div className="w-6 h-6 bg-slate-100 rounded-full flex items-center justify-center">🚁</div>
+                          <div className="w-6 h-6 bg-slate-100 rounded-full flex items-center justify-center text-[10px] font-semibold text-slate-500">ID</div>
                           {selectedFire.droneId}
                         </div>
                       </div>
@@ -202,8 +345,8 @@ export const FiresPage: React.FC = () => {
                         <div className="text-sm text-slate-500 mb-1">AI 신뢰도</div>
                         <div className="flex items-center gap-3">
                           <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
-                            <div 
-                              className={`h-full rounded-full ${selectedFire.confidence > 90 ? 'bg-red-500' : selectedFire.confidence > 70 ? 'bg-orange-500' : 'bg-yellow-500'}`} 
+                            <div
+                              className={`h-full rounded-full ${selectedFire.confidence > 90 ? 'bg-red-500' : selectedFire.confidence > 70 ? 'bg-orange-500' : 'bg-yellow-500'}`}
                               style={{ width: `${selectedFire.confidence}%` }}
                             ></div>
                           </div>
@@ -215,29 +358,36 @@ export const FiresPage: React.FC = () => {
                 </div>
 
                 <div className="bg-slate-900 rounded-xl overflow-hidden aspect-video relative flex items-center justify-center shadow-inner border border-slate-800">
-                  {/* Placeholder for Drone Camera Feed / Image */}
-                  <div className="absolute top-4 left-4 bg-black/60 text-white px-3 py-1 rounded text-sm backdrop-blur-sm font-mono flex items-center gap-2">
+                  <div className="absolute top-4 left-4 bg-black/60 text-white px-3 py-1 rounded text-sm backdrop-blur-sm font-mono flex items-center gap-2 z-10">
                     <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
                     REC
                   </div>
-                  <div className="absolute bottom-4 right-4 bg-black/60 text-white px-3 py-1 rounded text-xs backdrop-blur-sm font-mono">
+                  <div className="absolute bottom-4 right-4 bg-black/60 text-white px-3 py-1 rounded text-xs backdrop-blur-sm font-mono z-10">
                     {selectedFire.date} {selectedFire.time}
                   </div>
-                  <div className="text-center text-slate-400">
-                    <Flame size={48} className="mx-auto mb-2 opacity-50" />
-                    <p>드론 카메라 캡처 이미지 / 영상 피드</p>
-                    <p className="text-sm mt-1">백엔드 연동 시 표시됩니다.</p>
-                  </div>
+                  {selectedFire.imageUrl ? (
+                    <img
+                      src={selectedFire.imageUrl}
+                      alt={`${selectedFire.id} fire detection`}
+                      className="h-full w-full object-contain"
+                    />
+                  ) : (
+                    <div className="text-center text-slate-400">
+                      <Flame size={48} className="mx-auto mb-2 opacity-50" />
+                      <p>드론 카메라 캡처 이미지 / 영상 피드</p>
+                      <p className="text-sm mt-1">이미지 URL이 있는 이벤트를 선택하면 표시됩니다.</p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex gap-3 justify-end">
-                  <button 
+                  <button
                     onClick={() => handleUpdateStatus(selectedFire.id, '오탐지')}
                     className="px-4 py-2 bg-white border border-slate-300 rounded-lg text-slate-700 font-medium hover:bg-slate-50 transition-colors"
                   >
                     오탐지 처리
                   </button>
-                  <button 
+                  <button
                     onClick={() => handleUpdateStatus(selectedFire.id, '확인됨')}
                     className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-colors shadow-sm"
                   >

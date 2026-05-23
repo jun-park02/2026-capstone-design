@@ -1,35 +1,71 @@
-import base64
 import json
-import socket
+import mimetypes
+import os
 import time
 import uuid
 from pathlib import Path
+from urllib import error, request
 
 
-def chunk_bytes(data: bytes, chunk_size: int):
-    for i in range(0, len(data), chunk_size):
-        yield data[i : i + chunk_size]
+IMAGE_PATH = Path(os.getenv("IMAGE_PATH", r"C:\test\123123123123123.jpg"))
+TARGET_URL = os.getenv("TARGET_URL", "http://127.0.0.1:14551/fire-detections/upload")
+
+EVENT_ID = os.getenv("EVENT_ID", f"evt-{uuid.uuid4().hex[:12]}")
+IMAGE_ID = os.getenv("IMAGE_ID", f"img-{uuid.uuid4().hex[:12]}")
+CAPTURED_AT = os.getenv("CAPTURED_AT", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 1)))
+LAT = os.getenv("LAT", "37.5665")
+LON = os.getenv("LON", "126.9480")
+ALT = os.getenv("ALT", "50.0")
+CONFIDENCE = os.getenv("CONFIDENCE", "0.9")
+SYSTEM_ID = os.getenv("SYSTEM_ID", "1")
+REQUEST_TIMEOUT_SEC = float(os.getenv("REQUEST_TIMEOUT_SEC", "30"))
 
 
 def detect_image_format(image_path: Path) -> str:
-    ext = image_path.suffix.lower().replace(".", "")
-    if ext in ("jpg", "jpeg", "png", "webp"):
+    ext = image_path.suffix.lower().lstrip(".")
+    if ext == "jpeg":
+        return "jpg"
+    if ext in {"jpg", "png", "webp"}:
         return ext
     return "jpg"
 
-IMAGE_PATH = Path(r"C:\test\123123123123123.jpg")
-TARGET_IP = "127.0.0.1"
-TARGET_PORT = 14551
-CHUNK_SIZE = 1200
-DELAY_MS = 5
 
-EVENT_ID = f"evt-{uuid.uuid4().hex[:12]}"
-IMAGE_ID = f"img-{uuid.uuid4().hex[:12]}"
-CAPTURED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-LAT = 37.5665
-LON = 126.9780
-ALT = 50.0
-CONFIDENCE = 0.9
+def build_multipart_body(
+    fields: dict[str, str],
+    *,
+    file_field: str,
+    file_path: Path,
+    file_bytes: bytes,
+    content_type: str,
+) -> tuple[bytes, str]:
+    boundary = f"----fire-detect-{uuid.uuid4().hex}"
+    lines: list[bytes] = []
+
+    for name, value in fields.items():
+        lines.extend(
+            [
+                f"--{boundary}".encode("utf-8"),
+                f'Content-Disposition: form-data; name="{name}"'.encode("utf-8"),
+                b"",
+                str(value).encode("utf-8"),
+            ]
+        )
+
+    lines.extend(
+        [
+            f"--{boundary}".encode("utf-8"),
+            (
+                f'Content-Disposition: form-data; name="{file_field}"; '
+                f'filename="{file_path.name}"'
+            ).encode("utf-8"),
+            f"Content-Type: {content_type}".encode("utf-8"),
+            b"",
+            file_bytes,
+            f"--{boundary}--".encode("utf-8"),
+            b"",
+        ]
+    )
+    return b"\r\n".join(lines), boundary
 
 
 def main():
@@ -38,56 +74,69 @@ def main():
         raise FileNotFoundError(f"이미지 파일을 찾을 수 없습니다: {image_path}")
     if not image_path.is_file():
         raise ValueError(f"파일이 아닙니다: {image_path}")
-    if CHUNK_SIZE <= 0:
-        raise ValueError("CHUNK_SIZE는 1 이상이어야 합니다.")
-    if DELAY_MS < 0:
-        raise ValueError("DELAY_MS는 0 이상이어야 합니다.")
 
     image_bytes = image_path.read_bytes()
-    chunks = list(chunk_bytes(image_bytes, CHUNK_SIZE))
-    chunk_total = len(chunks)
-    image_format = detect_image_format(image_path)
-
-    if chunk_total == 0:
+    if not image_bytes:
         raise ValueError("빈 파일은 전송할 수 없습니다.")
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    dst = (TARGET_IP, TARGET_PORT)
+    image_format = detect_image_format(image_path)
+    content_type = mimetypes.guess_type(image_path.name)[0] or f"image/{image_format}"
+    if content_type == "image/jpeg":
+        image_format = "jpg"
+
+    fields = {
+        "event_id": EVENT_ID,
+        "image_id": IMAGE_ID,
+        "captured_at": CAPTURED_AT,
+        "lat": LAT,
+        "lon": LON,
+        "alt": ALT,
+        "confidence": CONFIDENCE,
+        "system_id": SYSTEM_ID,
+        "image_format": image_format,
+    }
+    body, boundary = build_multipart_body(
+        fields,
+        file_field="image",
+        file_path=image_path,
+        file_bytes=image_bytes,
+        content_type=content_type,
+    )
 
     print(
-        f"[FIRE-TX] start image={image_path} size={len(image_bytes)} "
-        f"chunks={chunk_total} dst={TARGET_IP}:{TARGET_PORT}"
+        f"[FIRE-TX] upload image={image_path} size={len(image_bytes)} "
+        f"url={TARGET_URL}"
     )
     print(
         f"[FIRE-TX] event_id={EVENT_ID} image_id={IMAGE_ID} "
-        f"lat={LAT} lon={LON} alt={ALT} conf={CONFIDENCE}"
+        f"lat={LAT} lon={LON} alt={ALT} conf={CONFIDENCE} system_id={SYSTEM_ID}"
     )
 
-    delay_sec = DELAY_MS / 1000.0
-    for idx, chunk in enumerate(chunks):
-        payload = {
-            "event_id": EVENT_ID,
-            "image_id": IMAGE_ID,
-            "chunk_index": idx,
-            "chunk_total": chunk_total,
-            "chunk_data": base64.b64encode(chunk).decode("ascii"),
-            "captured_at": CAPTURED_AT,
-            "lat": LAT,
-            "lon": LON,
-            "alt": ALT,
-            "confidence": CONFIDENCE,
-            "image_format": image_format,
-        }
-        packet = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        sock.sendto(packet, dst)
+    req = request.Request(
+        TARGET_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        },
+    )
 
-        if idx == 0 or idx == chunk_total - 1 or (idx + 1) % 20 == 0:
-            print(f"[FIRE-TX] sent {idx + 1}/{chunk_total}")
+    try:
+        with request.urlopen(req, timeout=REQUEST_TIMEOUT_SEC) as response:
+            response_body = response.read().decode("utf-8")
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"업로드 실패: HTTP {exc.code} {detail}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"업로드 서버에 연결할 수 없습니다: {exc}") from exc
 
-        if delay_sec > 0:
-            time.sleep(delay_sec)
+    try:
+        parsed = json.loads(response_body)
+    except json.JSONDecodeError:
+        parsed = response_body
 
-    sock.close()
+    print(f"[FIRE-TX] response={json.dumps(parsed, ensure_ascii=False)}")
     print("[FIRE-TX] done")
 
 

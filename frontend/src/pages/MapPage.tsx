@@ -1,11 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, ZoomControl } from 'react-leaflet';
+import React, { useEffect, useMemo, useState } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, ZoomControl, useMap } from 'react-leaflet';
 import { Card, CardContent } from '../components/ui/Card';
 import { Navigation, Flame, Battery } from 'lucide-react';
 import L from 'leaflet';
 import { USE_MOCK_DATA, apiClient } from '../api/config';
 
-// Icons
 const DRONE_ICON_URL = '/icons/drone.svg';
 
 const droneIcon = new L.Icon({
@@ -22,26 +21,70 @@ const fireIcon = new L.Icon({
   iconSize: [25, 41],
   iconAnchor: [12, 41],
   popupAnchor: [1, -34],
-  shadowSize: [41, 41]
+  shadowSize: [41, 41],
 });
 
-const mockDrones = [
+type Coordinate = [number, number];
+
+interface Drone {
+  id: string;
+  lat: number;
+  lng: number;
+  alt: number | null;
+  battery: number | null;
+  status: '정상' | '경고';
+}
+
+interface FireMarker {
+  id: string;
+  lat: number;
+  lng: number;
+  time: string;
+  status: '진행중' | '확인됨' | '오탐지';
+}
+
+type DronePaths = Record<string, Coordinate[]>;
+
+interface BackendDronePoint {
+  lat?: number | string | null;
+  lon?: number | string | null;
+  alt?: number | string | null;
+  position?: unknown;
+}
+
+interface BackendDronePath {
+  drone_id?: string | number | null;
+  system_id?: number | string | null;
+  path?: BackendDronePoint[];
+  positions?: unknown[];
+  latest?: BackendDronePoint | null;
+}
+
+interface BackendFireDetection {
+  event_id: string;
+  status?: string | null;
+  lat?: number | string | null;
+  lon?: number | string | null;
+  captured_at?: string | null;
+  received_at?: string | null;
+  user_confirmation?: string | null;
+}
+
+interface MapOverviewResponse {
+  drone_paths?: BackendDronePath[];
+  fire_detections?: BackendFireDetection[];
+}
+
+const mockDrones: Drone[] = [
   { id: 'DRN-01', lat: 37.5665, lng: 126.9780, alt: 120, battery: 85, status: '정상' },
   { id: 'DRN-02', lat: 37.5700, lng: 126.9820, alt: 110, battery: 42, status: '경고' },
   { id: 'DRN-03', lat: 37.5600, lng: 126.9900, alt: 130, battery: 90, status: '정상' },
 ];
 
-const mockFires = [
+const mockFires: FireMarker[] = [
   { id: 'FIRE-01', lat: 37.5750, lng: 126.9800, time: '14:32', status: '진행중' },
   { id: 'FIRE-02', lat: 37.5550, lng: 126.9700, time: '12:15', status: '확인됨' },
 ];
-
-type Drone = typeof mockDrones[number];
-type DronePathPoint = [number, number];
-type DronePaths = Record<string, DronePathPoint[]>;
-
-const MAX_DRONE_PATH_POINTS = 40;
-const DRONE_PATH_COLORS = ['#2563eb', '#0f766e', '#f97316', '#7c3aed', '#db2777'];
 
 const mockDronePaths: DronePaths = {
   'DRN-01': [
@@ -64,67 +107,185 @@ const mockDronePaths: DronePaths = {
   ],
 };
 
+const DRONE_PATH_COLORS = ['#2563eb', '#0f766e', '#f97316', '#7c3aed', '#db2777'];
+
 const getDronePathColor = (index: number) => DRONE_PATH_COLORS[index % DRONE_PATH_COLORS.length];
 
-const appendDronePositions = (previousPaths: DronePaths, nextDrones: Drone[]) => {
-  const nextPaths: DronePaths = {};
+const toNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
 
-  nextDrones.forEach((drone) => {
-    const nextPoint: DronePathPoint = [drone.lat, drone.lng];
-    const previousPoints = previousPaths[drone.id] ?? [];
-    const lastPoint = previousPoints[previousPoints.length - 1];
-    const hasSameLastPoint = lastPoint?.[0] === nextPoint[0] && lastPoint?.[1] === nextPoint[1];
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+};
 
-    nextPaths[drone.id] = hasSameLastPoint
-      ? previousPoints
-      : [...previousPoints, nextPoint].slice(-MAX_DRONE_PATH_POINTS);
-  });
+const toCoordinate = (value: unknown): Coordinate | null => {
+  if (!Array.isArray(value) || value.length < 2) {
+    return null;
+  }
 
-  return nextPaths;
+  const lat = toNumber(value[0]);
+  const lng = toNumber(value[1]);
+  return lat === null || lng === null ? null : [lat, lng];
+};
+
+const coordinateFromPoint = (point?: BackendDronePoint | null): Coordinate | null => {
+  if (!point) {
+    return null;
+  }
+
+  return toCoordinate(point.position) ?? (() => {
+    const lat = toNumber(point.lat);
+    const lng = toNumber(point.lon);
+    return lat === null || lng === null ? null : [lat, lng];
+  })();
+};
+
+const buildDronePath = (dronePath: BackendDronePath): Coordinate[] => {
+  const directPositions = (dronePath.positions ?? [])
+    .map(toCoordinate)
+    .filter((point): point is Coordinate => point !== null);
+
+  if (directPositions.length > 0) {
+    return directPositions;
+  }
+
+  return (dronePath.path ?? [])
+    .map(coordinateFromPoint)
+    .filter((point): point is Coordinate => point !== null);
+};
+
+const formatTime = (value?: string | null) => {
+  if (!value) {
+    return '-';
+  }
+
+  const timePart = value.includes('T') ? value.split('T')[1] : value.split(' ')[1];
+  return timePart ? timePart.slice(0, 5) : value;
+};
+
+const toFireStatus = (status?: string | null, confirmation?: string | null): FireMarker['status'] => {
+  if (confirmation === 'Y' || status === 'confirmed' || status === 'fire_confirmed') {
+    return '확인됨';
+  }
+  if (confirmation === 'N' || status === 'rejected' || status === 'reviewed') {
+    return '오탐지';
+  }
+  return '진행중';
+};
+
+const transformOverview = (overview: MapOverviewResponse) => {
+  const nextDronePaths: DronePaths = {};
+  const nextDrones = (overview.drone_paths ?? [])
+    .map((dronePath, index): Drone | null => {
+      const path = buildDronePath(dronePath);
+      const latestPoint = coordinateFromPoint(dronePath.latest) ?? path[path.length - 1];
+      if (!latestPoint) {
+        return null;
+      }
+
+      const id = String(dronePath.drone_id ?? dronePath.system_id ?? `DRN-${index + 1}`);
+      const latestAlt = toNumber(dronePath.latest?.alt);
+      nextDronePaths[id] = path.length > 0 ? path : [latestPoint];
+
+      return {
+        id,
+        lat: latestPoint[0],
+        lng: latestPoint[1],
+        alt: latestAlt,
+        battery: null,
+        status: '정상' as const,
+      };
+    })
+    .filter((drone): drone is Drone => drone !== null);
+
+  const nextFires = (overview.fire_detections ?? [])
+    .map((fire) => {
+      const lat = toNumber(fire.lat);
+      const lng = toNumber(fire.lon);
+      if (lat === null || lng === null) {
+        return null;
+      }
+
+      return {
+        id: fire.event_id,
+        lat,
+        lng,
+        time: formatTime(fire.captured_at ?? fire.received_at),
+        status: toFireStatus(fire.status, fire.user_confirmation),
+      };
+    })
+    .filter((fire): fire is FireMarker => fire !== null);
+
+  return { drones: nextDrones, dronePaths: nextDronePaths, fires: nextFires };
+};
+
+const MapAutoFit: React.FC<{ points: Coordinate[] }> = ({ points }) => {
+  const map = useMap();
+
+  useEffect(() => {
+    if (points.length === 0) {
+      return;
+    }
+
+    if (points.length === 1) {
+      map.setView(points[0], 14);
+      return;
+    }
+
+    map.fitBounds(L.latLngBounds(points), { padding: [32, 32], maxZoom: 14 });
+  }, [map, points]);
+
+  return null;
 };
 
 export const MapPage: React.FC = () => {
   const [activeDrone, setActiveDrone] = useState<string | null>(null);
-  const [drones, setDrones] = useState<Drone[]>(
-    USE_MOCK_DATA ? mockDrones : []
-  );
-  const [dronePaths, setDronePaths] = useState<DronePaths>(
-    USE_MOCK_DATA ? mockDronePaths : {}
-  );
-  const [fires, setFires] = useState<typeof mockFires>(
-    USE_MOCK_DATA ? mockFires : []
-  );
+  const [drones, setDrones] = useState<Drone[]>(USE_MOCK_DATA ? mockDrones : []);
+  const [dronePaths, setDronePaths] = useState<DronePaths>(USE_MOCK_DATA ? mockDronePaths : {});
+  const [fires, setFires] = useState<FireMarker[]>(USE_MOCK_DATA ? mockFires : []);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!USE_MOCK_DATA) {
-      const fetchMapData = async () => {
-        try {
-          const [dronesRes, firesRes] = await Promise.all([
-            apiClient.get('/drones'),
-            apiClient.get('/fires/active')
-          ]);
-          const nextDrones = dronesRes.data as Drone[];
-          setDrones(nextDrones);
-          setDronePaths(previousPaths => appendDronePositions(previousPaths, nextDrones));
-          setFires(firesRes.data);
-        } catch (error) {
-          console.error('Failed to fetch map data:', error);
-        }
-      };
-
-      fetchMapData();
-      
-      // 실시간 업데이트를 위한 폴링 (예: 5초마다)
-      const interval = setInterval(fetchMapData, 5000);
-      return () => clearInterval(interval);
+    if (USE_MOCK_DATA) {
+      return;
     }
+
+    const fetchMapData = async () => {
+      try {
+        const res = await apiClient.get<MapOverviewResponse>('/map/overview');
+        const nextData = transformOverview(res.data);
+        setDrones(nextData.drones);
+        setDronePaths(nextData.dronePaths);
+        setFires(nextData.fires);
+        setLoadError(null);
+      } catch (error) {
+        console.error('Failed to fetch map overview:', error);
+        setLoadError('지도 데이터를 불러오지 못했습니다.');
+      }
+    };
+
+    fetchMapData();
+    const interval = setInterval(fetchMapData, 5000);
+    return () => clearInterval(interval);
   }, []);
+
+  const mapFitPoints = useMemo(() => {
+    const pathPoints = Object.values(dronePaths).reduce<Coordinate[]>(
+      (points, path) => [...points, ...path],
+      [],
+    );
+    const firePoints = fires.map((fire) => [fire.lat, fire.lng] as Coordinate);
+    return [...pathPoints, ...firePoints];
+  }, [dronePaths, fires]);
 
   return (
     <div className="h-[calc(100vh-6rem)] flex flex-col space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold tracking-tight text-slate-900">실시간 지도</h2>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {loadError && <span className="text-sm text-red-600">{loadError}</span>}
           <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-md shadow-sm border border-slate-200 text-sm">
             <img src={DRONE_ICON_URL} alt="drone" className="w-4 h-4" />
             <span>드론 ({drones.length})</span>
@@ -137,8 +298,7 @@ export const MapPage: React.FC = () => {
       </div>
 
       <div className="flex-1 flex gap-4 relative">
-        {/* 사이드 패널 (선택적 표시) */}
-        <div className="w-80 flex flex-col gap-4 overflow-y-auto hidden md:flex">
+        <div className="w-80 flex-col gap-4 overflow-y-auto hidden md:flex">
           <Card className="border-slate-200 shadow-sm">
             <div className="p-4 border-b border-slate-100 bg-slate-50 rounded-t-xl">
               <h3 className="font-semibold text-slate-800 flex items-center gap-2">
@@ -147,9 +307,9 @@ export const MapPage: React.FC = () => {
               </h3>
             </div>
             <CardContent className="p-0 divide-y divide-slate-100">
-              {drones.map(drone => (
-                <div 
-                  key={drone.id} 
+              {drones.map((drone) => (
+                <div
+                  key={drone.id}
                   className={`p-4 hover:bg-slate-50 cursor-pointer transition-colors ${activeDrone === drone.id ? 'bg-blue-50 border-l-4 border-blue-500' : ''}`}
                   onClick={() => setActiveDrone(drone.id)}
                 >
@@ -160,8 +320,11 @@ export const MapPage: React.FC = () => {
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-sm text-slate-600">
-                    <div className="flex items-center gap-1"><Battery size={14} /> {drone.battery}%</div>
-                    <div>고도: {drone.alt}m</div>
+                    <div className="flex items-center gap-1">
+                      <Battery size={14} />
+                      {drone.battery === null ? '-' : `${drone.battery}%`}
+                    </div>
+                    <div>고도: {drone.alt === null ? '-' : `${drone.alt}m`}</div>
                   </div>
                 </div>
               ))}
@@ -169,21 +332,20 @@ export const MapPage: React.FC = () => {
           </Card>
         </div>
 
-        {/* 지도 영역 */}
         <Card className="flex-1 overflow-hidden shadow-sm border-slate-200 relative">
-          <MapContainer 
-            center={[37.5665, 126.9780]} 
-            zoom={13} 
+          <MapContainer
+            center={[37.5665, 126.9780]}
+            zoom={13}
             className="h-full w-full z-0"
             zoomControl={false}
           >
+            <MapAutoFit points={mapFitPoints} />
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
             />
             <ZoomControl position="bottomright" />
 
-            {/* Drone paths */}
             {drones.map((drone, index) => {
               const path = dronePaths[drone.id] ?? [];
               const isActive = activeDrone === drone.id;
@@ -204,16 +366,15 @@ export const MapPage: React.FC = () => {
               );
             })}
 
-            {/* Drones */}
-            {drones.map(drone => (
+            {drones.map((drone) => (
               <Marker key={drone.id} position={[drone.lat, drone.lng]} icon={droneIcon}>
                 <Popup className="rounded-lg">
                   <div className="p-1">
                     <h4 className="font-bold text-slate-800 border-b pb-1 mb-2">{drone.id}</h4>
                     <div className="space-y-1 text-sm">
                       <p><span className="text-slate-500">상태:</span> <span className={drone.status === '정상' ? 'text-green-600 font-medium' : 'text-orange-600 font-medium'}>{drone.status}</span></p>
-                      <p><span className="text-slate-500">배터리:</span> {drone.battery}%</p>
-                      <p><span className="text-slate-500">고도:</span> {drone.alt}m</p>
+                      <p><span className="text-slate-500">배터리:</span> {drone.battery === null ? '-' : `${drone.battery}%`}</p>
+                      <p><span className="text-slate-500">고도:</span> {drone.alt === null ? '-' : `${drone.alt}m`}</p>
                       <p><span className="text-slate-500">위치:</span> {drone.lat.toFixed(4)}, {drone.lng.toFixed(4)}</p>
                     </div>
                   </div>
@@ -221,8 +382,7 @@ export const MapPage: React.FC = () => {
               </Marker>
             ))}
 
-            {/* Fires */}
-            {fires.map(fire => (
+            {fires.map((fire) => (
               <Marker key={fire.id} position={[fire.lat, fire.lng]} icon={fireIcon}>
                 <Popup>
                   <div className="p-1">
