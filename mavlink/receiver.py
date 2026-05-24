@@ -1,20 +1,54 @@
 import json
 import os
+import socket
 import time
 from typing import Any
 
 import redis
-from pymavlink import mavutil
 
 
+UDP_HOST = os.getenv("UDP_HOST", "0.0.0.0")
 UDP_PORT = int(os.getenv("UDP_PORT", "14550"))
+UDP_BUFFER_SIZE = int(os.getenv("UDP_BUFFER_SIZE", "65535"))
+
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 STREAM_KEY = os.getenv("STREAM_KEY", "mystream")
+
+DEFAULT_SYSTEM_ID = int(os.getenv("DEFAULT_SYSTEM_ID", os.getenv("SYSTEM_ID", "1")))
+DEFAULT_COMPONENT_ID = int(os.getenv("DEFAULT_COMPONENT_ID", os.getenv("COMPONENT_ID", "1")))
 DRONE_LAST_SEEN_KEY = os.getenv("DRONE_LAST_SEEN_KEY", "drone:last_seen")
 DRONE_STATUS_KEY_PREFIX = os.getenv("DRONE_STATUS_KEY_PREFIX", "drone:status")
 DRONE_STATUS_TTL_SEC = int(os.getenv("DRONE_STATUS_TTL_SEC", "86400"))
-MAVLINK_SAMPLE_INTERVAL_SEC = float(os.getenv("MAVLINK_SAMPLE_INTERVAL_SEC", "2"))
+JSON_SAMPLE_INTERVAL_SEC = float(os.getenv("JSON_SAMPLE_INTERVAL_SEC", "2"))
+SIMTIME_UNIT = os.getenv("SIMTIME_UNIT", "seconds").strip().lower()
+
+
+MAV_STATE_NAMES = {
+    0: "MAV_STATE_UNINIT",
+    1: "MAV_STATE_BOOT",
+    2: "MAV_STATE_CALIBRATING",
+    3: "MAV_STATE_STANDBY",
+    4: "MAV_STATE_ACTIVE",
+    5: "MAV_STATE_CRITICAL",
+    6: "MAV_STATE_EMERGENCY",
+    7: "MAV_STATE_POWEROFF",
+    8: "MAV_STATE_FLIGHT_TERMINATION",
+}
+
+VEHICLE_STATUS_TO_FLAGS = {
+    "MC_STANDBY": {"armed": False, "flight_enable": False},
+    "MC_ARMED_STANDBY": {"armed": True, "flight_enable": False},
+    "MC_FLYING": {"armed": True, "flight_enable": True},
+    "MC_INVALID_STATE": {"armed": False, "flight_enable": True},
+}
+
+VEHICLE_STATUS_TO_MAV_STATE = {
+    "MC_STANDBY": 3,
+    "MC_ARMED_STANDBY": 3,
+    "MC_FLYING": 4,
+    "MC_INVALID_STATE": 5,
+}
 
 
 def create_redis_client():
@@ -27,62 +61,247 @@ def create_redis_client():
             socket_connect_timeout=5,
         )
         client.ping()
-        print(f"[RX] Redis 연결 성공: {REDIS_HOST}:{REDIS_PORT}")
+        print(f"[RX] Redis connected: {REDIS_HOST}:{REDIS_PORT}")
         return client
     except Exception as exc:
-        print(f"[RX] Redis 연결 실패: {exc}")
+        print(f"[RX] Redis connection failed: {exc}")
         return None
 
 
-def get_message_source_ids(msg) -> tuple[int | None, int | None]:
-    """MAVLink 메시지에서 sysid, compid를 안전하게 추출한다."""
-    system_id = None
-    component_id = None
+def now_str() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def to_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def to_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def meters_to_millimeters(value: Any) -> int | None:
+    number_value = to_float(value)
+    if number_value is None:
+        return None
+    return int(round(number_value * 1000))
+
+
+def volts_to_millivolts(value: Any) -> int | None:
+    number_value = to_float(value)
+    if number_value is None:
+        return None
+    return int(round(number_value * 1000))
+
+
+def speed_to_centimeters_per_second(value: Any) -> int | None:
+    number_value = to_float(value)
+    if number_value is None:
+        return None
+    return int(round(number_value * 100))
+
+
+def normalize_simtime_to_time_boot_ms(value: Any) -> int | None:
+    simtime = to_float(value)
+    if simtime is None:
+        return None
+    if SIMTIME_UNIT in {"millisecond", "milliseconds", "ms"}:
+        return int(round(simtime))
+    return int(round(simtime * 1000))
+
+
+def normalize_vehicle_status(value: Any) -> str:
+    return str(value or "UNKNOWN").strip().upper() or "UNKNOWN"
+
+
+def get_mav_state_name(system_status: Any, vehicle_status: str | None = None) -> str:
+    if vehicle_status and vehicle_status != "UNKNOWN":
+        return vehicle_status
 
     try:
-        system_id = msg.get_srcSystem()
-    except Exception:
-        pass
-
-    try:
-        component_id = msg.get_srcComponent()
-    except Exception:
-        pass
-
-    return system_id, component_id
-
-
-def get_mav_state_name(system_status: Any) -> str:
-    """MAV_STATE enum 값을 사람이 읽기 쉬운 문자열로 바꾼다."""
-    try:
-        enum_entry = mavutil.mavlink.enums["MAV_STATE"][int(system_status)]
-        return enum_entry.name
+        return MAV_STATE_NAMES[int(system_status)]
     except Exception:
         return str(system_status) if system_status is not None else "UNKNOWN"
 
 
-def should_process_message(
-    last_processed_at: dict[tuple[int | str, int | str, str], float],
+def get_system_id(packet: dict[str, Any]) -> int:
+    for key in ("system_id", "sysid", "drone_id"):
+        system_id = to_int(packet.get(key))
+        if system_id is not None:
+            return system_id
+    return DEFAULT_SYSTEM_ID
+
+
+def get_component_id(packet: dict[str, Any]) -> int:
+    for key in ("component_id", "compid"):
+        component_id = to_int(packet.get(key))
+        if component_id is not None:
+            return component_id
+    return DEFAULT_COMPONENT_ID
+
+
+def first_present(packet: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in packet and packet[key] is not None and packet[key] != "":
+            return packet[key]
+    return None
+
+
+def should_process_packet(
+    last_processed_at: dict[int | str, float],
     *,
-    msg_type: str,
     system_id: int | None,
-    component_id: int | None,
     now: float,
 ) -> bool:
-    if MAVLINK_SAMPLE_INTERVAL_SEC <= 0:
+    if JSON_SAMPLE_INTERVAL_SEC <= 0:
         return True
 
-    message_key = (
-        system_id if system_id is not None else "unknown",
-        component_id if component_id is not None else "unknown",
-        msg_type,
-    )
-    last_seen = last_processed_at.get(message_key)
-    if last_seen is not None and now - last_seen < MAVLINK_SAMPLE_INTERVAL_SEC:
+    packet_key = system_id if system_id is not None else "unknown"
+    last_seen = last_processed_at.get(packet_key)
+    if last_seen is not None and now - last_seen < JSON_SAMPLE_INTERVAL_SEC:
         return False
 
-    last_processed_at[message_key] = now
+    last_processed_at[packet_key] = now
     return True
+
+
+def parse_udp_json(data: bytes) -> dict[str, Any]:
+    text = data.decode("utf-8")
+    packet = json.loads(text)
+    if not isinstance(packet, dict):
+        raise ValueError("UDP payload must be a JSON object")
+    return packet
+
+
+def get_lla(packet: dict[str, Any]) -> tuple[float | None, float | None, float | None]:
+    lla = packet.get("lla")
+    if isinstance(lla, (list, tuple)) and len(lla) >= 3:
+        return to_float(lla[0]), to_float(lla[1]), to_float(lla[2])
+
+    return (
+        to_float(first_present(packet, "lat", "latitude")),
+        to_float(first_present(packet, "lon", "lng", "longitude")),
+        to_float(first_present(packet, "alt", "altitude")),
+    )
+
+
+def build_global_position_message(packet: dict[str, Any]) -> dict[str, Any] | None:
+    lat, lon, alt = get_lla(packet)
+    if lat is None or lon is None:
+        return None
+
+    relative_altitude = packet.get("relative_altitude")
+    heading = to_float(packet.get("heading"))
+    va = to_float(packet.get("va"))
+
+    return {
+        "mavpackettype": "GLOBAL_POSITION_INT",
+        "source_format": "json_udp",
+        "simtime": packet.get("simtime"),
+        "time_boot_ms": normalize_simtime_to_time_boot_ms(packet.get("simtime")),
+        "lat": lat,
+        "lon": lon,
+        "alt": meters_to_millimeters(alt),
+        "relative_alt": meters_to_millimeters(relative_altitude),
+        "relative_altitude": to_float(relative_altitude),
+        "vx": speed_to_centimeters_per_second(va),
+        "vy": 0,
+        "vz": 0,
+        "hdg": heading,
+        "heading": heading,
+        "va": va,
+    }
+
+
+def build_vfr_hud_message(packet: dict[str, Any]) -> dict[str, Any] | None:
+    va = to_float(packet.get("va"))
+    heading = to_float(packet.get("heading"))
+    alt = get_lla(packet)[2]
+    if va is None and heading is None and alt is None:
+        return None
+
+    return {
+        "mavpackettype": "VFR_HUD",
+        "source_format": "json_udp",
+        "simtime": packet.get("simtime"),
+        "time_boot_ms": normalize_simtime_to_time_boot_ms(packet.get("simtime")),
+        "airspeed": va,
+        "groundspeed": va,
+        "heading": heading,
+        "alt": alt,
+        "climb": 0,
+        "va": va,
+    }
+
+
+def build_battery_status_message(packet: dict[str, Any]) -> dict[str, Any] | None:
+    battery = packet.get("battery")
+    if not isinstance(battery, dict):
+        return None
+
+    soc = to_float(battery.get("soc"))
+    voltage = to_float(battery.get("voltage"))
+    battery_percent = round(soc * 100, 2) if soc is not None else None
+
+    return {
+        "mavpackettype": "BATTERY_STATUS",
+        "source_format": "json_udp",
+        "simtime": packet.get("simtime"),
+        "time_boot_ms": normalize_simtime_to_time_boot_ms(packet.get("simtime")),
+        "battery_remaining": battery_percent,
+        "voltage_battery": voltage,
+        "voltage_battery_mv": volts_to_millivolts(voltage),
+        "current_battery": battery.get("current"),
+        "soc": soc,
+    }
+
+
+def build_heartbeat_message(packet: dict[str, Any]) -> dict[str, Any] | None:
+    raw_status = (
+        packet.get("vehicle_status")
+        or packet.get("vehicle_Status")
+        or packet.get("vehicleStatus")
+    )
+    if raw_status is None:
+        return None
+
+    vehicle_status = normalize_vehicle_status(raw_status)
+    flags = VEHICLE_STATUS_TO_FLAGS.get(vehicle_status, {})
+    system_status = VEHICLE_STATUS_TO_MAV_STATE.get(vehicle_status)
+
+    return {
+        "mavpackettype": "HEARTBEAT",
+        "source_format": "json_udp",
+        "simtime": packet.get("simtime"),
+        "time_boot_ms": normalize_simtime_to_time_boot_ms(packet.get("simtime")),
+        "vehicle_status": vehicle_status,
+        "armed": flags.get("armed"),
+        "flight_enable": flags.get("flight_enable"),
+        "system_status": system_status,
+        "system_status_name": get_mav_state_name(system_status, vehicle_status),
+        "base_mode": "",
+        "custom_mode": vehicle_status,
+    }
+
+
+def build_stream_messages(packet: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    candidates = [
+        ("GLOBAL_POSITION_INT", build_global_position_message(packet)),
+        ("VFR_HUD", build_vfr_hud_message(packet)),
+        ("BATTERY_STATUS", build_battery_status_message(packet)),
+        ("HEARTBEAT", build_heartbeat_message(packet)),
+    ]
+    return [(message_type, data) for message_type, data in candidates if data is not None]
 
 
 def update_drone_status(
@@ -93,17 +312,12 @@ def update_drone_status(
     system_id: int | None,
     component_id: int | None,
 ):
-    """
-    HEARTBEAT 메시지를 기준으로 드론별 최신 상태를 Redis에 저장한다.
-
-    Streams는 원본 메시지 이력을 쌓는 용도이고,
-    이 별도 키는 "현재 활성 드론 수"처럼 최신 상태 기반 집계를 빠르게 하기 위한 저장소다.
-    """
     if not redis_client or msg_type != "HEARTBEAT" or system_id is None:
         return
 
     now_ts = time.time()
     system_status = msg_dict.get("system_status")
+    vehicle_status = normalize_vehicle_status(msg_dict.get("vehicle_status"))
     status_key = f"{DRONE_STATUS_KEY_PREFIX}:{system_id}"
 
     pipe = redis_client.pipeline()
@@ -114,12 +328,17 @@ def update_drone_status(
             "system_id": system_id,
             "component_id": component_id if component_id is not None else "",
             "message_type": msg_type,
+            "vehicle_status": vehicle_status,
+            "armed": "" if msg_dict.get("armed") is None else int(bool(msg_dict.get("armed"))),
+            "flight_enable": ""
+            if msg_dict.get("flight_enable") is None
+            else int(bool(msg_dict.get("flight_enable"))),
             "system_status": system_status if system_status is not None else "",
-            "system_status_name": get_mav_state_name(system_status),
+            "system_status_name": get_mav_state_name(system_status, vehicle_status),
             "base_mode": msg_dict.get("base_mode", ""),
             "custom_mode": msg_dict.get("custom_mode", ""),
             "last_seen_ts": now_ts,
-            "last_seen_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "last_seen_at": now_str(),
         },
     )
     pipe.expire(status_key, DRONE_STATUS_TTL_SEC)
@@ -127,68 +346,117 @@ def update_drone_status(
     pipe.execute()
 
     print(
-        f"[RX] 드론 상태 갱신: sysid={system_id} compid={component_id} "
-        f"status={get_mav_state_name(system_status)}"
+        f"[RX] Drone status updated: sysid={system_id} compid={component_id} "
+        f"status={vehicle_status}"
     )
 
 
-def main():
-    redis_client = create_redis_client()
-    print(f"[RX] UDP 수신 시작: 0.0.0.0:{UDP_PORT}")
-    print(f"[RX] Redis Stream: {STREAM_KEY}")
-    print(f"[RX] MAVLink sample interval: {MAVLINK_SAMPLE_INTERVAL_SEC}s")
-    print(f"[RX] 드론 상태 키: {DRONE_LAST_SEEN_KEY}, {DRONE_STATUS_KEY_PREFIX}:<sysid>")
+def publish_message(
+    redis_client,
+    *,
+    message_type: str,
+    msg_dict: dict[str, Any],
+    system_id: int,
+    component_id: int,
+    src_ip: str,
+    src_port: int,
+) -> str:
+    payload = {
+        "message_type": message_type,
+        "timestamp": now_str(),
+        "system_id": system_id,
+        "component_id": component_id,
+        "src_ip": src_ip,
+        "src_port": src_port,
+        "data": json.dumps(msg_dict, ensure_ascii=False),
+    }
+    msg_id = redis_client.xadd(
+        STREAM_KEY,
+        {"payload": json.dumps(payload, ensure_ascii=False)},
+        maxlen=10000,
+        approximate=True,
+    )
+    return str(msg_id)
 
-    mav = mavutil.mavlink_connection(f"udp:0.0.0.0:{UDP_PORT}")
-    last_processed_at: dict[tuple[int | str, int | str, str], float] = {}
+
+def main():
+    # Redis 연결을 먼저 시도한다. 실패해도 UDP 수신은 계속 수행한다.
+    redis_client = create_redis_client()
+    print(f"[RX] UDP JSON receiver listening: {UDP_HOST}:{UDP_PORT}")
+    print(f"[RX] Redis Stream: {STREAM_KEY}")
+    print(f"[RX] JSON sample interval: {JSON_SAMPLE_INTERVAL_SEC}s")
+    print(f"[RX] simtime unit: {SIMTIME_UNIT}")
+    print(f"[RX] Drone status keys: {DRONE_LAST_SEEN_KEY}, {DRONE_STATUS_KEY_PREFIX}:<sysid>")
+
+    # 드론별 마지막 처리 시각을 저장해서 너무 잦은 패킷 저장을 제한한다.
+    last_processed_at: dict[int | str, float] = {}
+
+    # 표준 socket 라이브러리로 UDP 소켓을 열고 지정된 포트에 바인딩한다.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((UDP_HOST, UDP_PORT))
 
     while True:
-        # recv_match는 pymavlink가 제공하는 MAVLink 메시지 수신 함수다.
-        msg = mav.recv_match(blocking=True)
-        if not msg:
+        # recvfrom은 UDP 패킷 1개와 송신자 주소를 함께 반환한다.
+        data, address = sock.recvfrom(UDP_BUFFER_SIZE)
+        src_ip, src_port = address
+
+        try:
+            # 드론에서 보낸 바이트 데이터를 UTF-8 JSON 객체로 변환한다.
+            packet = parse_udp_json(data)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            print(f"[RX] Invalid JSON from {src_ip}:{src_port}: {exc}")
             continue
 
-        msg_type = msg.get_type()
-        msg_dict = msg.to_dict()
-        system_id, component_id = get_message_source_ids(msg)
+        # JSON에 system_id/component_id가 없으면 환경 변수의 기본값을 사용한다.
+        system_id = get_system_id(packet)
+        component_id = get_component_id(packet)
 
-        if not should_process_message(
+        # 같은 드론에서 너무 빠르게 들어오는 패킷은 샘플링 간격에 따라 건너뛴다.
+        if not should_process_packet(
             last_processed_at,
-            msg_type=msg_type,
             system_id=system_id,
-            component_id=component_id,
             now=time.monotonic(),
         ):
             continue
 
-        print(f"[RX] {msg_type} sysid={system_id} compid={component_id}: {msg_dict}")
+        # 수신한 JSON 1개를 위치, 속도, 배터리, 상태 메시지로 나누어 Redis에 저장한다.
+        messages = build_stream_messages(packet)
+        if not messages:
+            print(f"[RX] No usable telemetry fields from {src_ip}:{src_port}: {packet}")
+            continue
 
-        if redis_client:
+        print(
+            f"[RX] JSON sysid={system_id} compid={component_id} "
+            f"src={src_ip}:{src_port}: {packet}"
+        )
+
+        if not redis_client:
+            continue
+
+        for message_type, msg_dict in messages:
             try:
+                # HEARTBEAT 메시지일 때는 최신 드론 상태 캐시도 함께 갱신한다.
                 update_drone_status(
                     redis_client,
-                    msg_type=msg_type,
+                    msg_type=message_type,
                     msg_dict=msg_dict,
                     system_id=system_id,
                     component_id=component_id,
                 )
 
-                payload = {
-                    "message_type": msg_type,
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "system_id": system_id,
-                    "component_id": component_id,
-                    "data": json.dumps(msg_dict),
-                }
-                msg_id = redis_client.xadd(
-                    STREAM_KEY,
-                    {"payload": json.dumps(payload)},
-                    maxlen=10000,
-                    approximate=True,
+                # 기존 백엔드 소비자가 읽는 Redis Stream payload 형식으로 발행한다.
+                msg_id = publish_message(
+                    redis_client,
+                    message_type=message_type,
+                    msg_dict=msg_dict,
+                    system_id=system_id,
+                    component_id=component_id,
+                    src_ip=src_ip,
+                    src_port=src_port,
                 )
-                print(f"[RX] Redis Stream 저장: {msg_id}")
+                print(f"[RX] Redis Stream saved: {msg_id} type={message_type}")
             except Exception as exc:
-                print(f"[RX] Redis 저장 오류: {exc}")
+                print(f"[RX] Redis save failed: {exc}")
 
 
 if __name__ == "__main__":

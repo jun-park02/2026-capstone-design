@@ -6,7 +6,6 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pymavlink import mavutil
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -23,6 +22,9 @@ DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
 DRONE_PATH_KEY_PREFIX = os.getenv("DRONE_PATH_KEY_PREFIX", "drone:path")
 DEFAULT_ACTIVE_TIMEOUT_SEC = int(os.getenv("DRONE_ACTIVE_TIMEOUT_SEC", "5"))
 DEFAULT_MAP_CENTER = [37.5665, 126.9780]
+MAV_STATE_ACTIVE = 4
+MAV_STATE_CRITICAL = 5
+MAV_STATE_EMERGENCY = 6
 
 
 def _parse_json(value: Any) -> Any:
@@ -231,7 +233,7 @@ def _active_drone_count(timeout_sec: int = DEFAULT_ACTIVE_TIMEOUT_SEC) -> int:
                 last_seen_ts = float(last_seen_ts_raw)
             except (TypeError, ValueError):
                 continue
-            if system_status == mavutil.mavlink.MAV_STATE_ACTIVE and last_seen_ts >= threshold_ts:
+            if system_status == MAV_STATE_ACTIVE and last_seen_ts >= threshold_ts:
                 active_count += 1
         return active_count
     except Exception:
@@ -263,8 +265,8 @@ def _drone_warning_error_count(session: Session, *, start_at: datetime, end_at: 
         elif row.message_type == "HEARTBEAT":
             system_status = _to_int(data.get("system_status"))
             if system_status in {
-                mavutil.mavlink.MAV_STATE_CRITICAL,
-                mavutil.mavlink.MAV_STATE_EMERGENCY,
+                MAV_STATE_CRITICAL,
+                MAV_STATE_EMERGENCY,
             }:
                 count += 1
     return count

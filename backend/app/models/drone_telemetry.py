@@ -12,7 +12,7 @@ from app.db import Base
 
 
 class DroneTelemetry(Base):
-    """Persisted MAVLink telemetry received from Redis Streams."""
+    """Persisted drone telemetry received from Redis Streams."""
 
     __tablename__ = "drone_telemetry"
     __table_args__ = (

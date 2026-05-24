@@ -14,7 +14,7 @@ from app.models import FireEvent
 
 router = APIRouter(tags=["map"])
 
-DEFAULT_MAVLINK_STREAM_KEY = os.getenv("STREAM_KEY", "mystream")
+DEFAULT_DRONE_STREAM_KEY = os.getenv("STREAM_KEY", "mystream")
 DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
 DRONE_PATH_KEY_PREFIX = os.getenv("DRONE_PATH_KEY_PREFIX", "drone:path")
 
@@ -209,7 +209,7 @@ def _get_drone_paths(
             "drones": [],
         }
 
-    if stream_key == DEFAULT_MAVLINK_STREAM_KEY:
+    if stream_key == DEFAULT_DRONE_STREAM_KEY:
         cached_drones = _get_cached_drone_paths(system_id=system_id, point_limit=point_limit)
         if cached_drones:
             return {
@@ -303,7 +303,7 @@ def get_map_drone_paths(
     system_id: int | None = Query(None, ge=1),
     message_limit: int = Query(3000, ge=1, le=10000),
     point_limit: int = Query(500, ge=1, le=5000),
-    stream_key: str = Query(DEFAULT_MAVLINK_STREAM_KEY, min_length=1),
+    stream_key: str = Query(DEFAULT_DRONE_STREAM_KEY, min_length=1),
 ):
     """Return drone paths as Leaflet Polyline-ready coordinate arrays."""
     result = _get_drone_paths(
@@ -337,7 +337,7 @@ def get_map_overview(
     point_limit: int = Query(500, ge=1, le=5000),
     fire_limit: int = Query(100, ge=1, le=1000),
     confirmation: Literal["all", "pending", "confirmed", "rejected"] = Query("all"),
-    stream_key: str = Query(DEFAULT_MAVLINK_STREAM_KEY, min_length=1),
+    stream_key: str = Query(DEFAULT_DRONE_STREAM_KEY, min_length=1),
     session: Session = Depends(get_db_session),
 ):
     """Return drone paths and fire markers in one response for the map screen."""

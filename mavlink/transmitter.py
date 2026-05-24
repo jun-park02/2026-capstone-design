@@ -1,14 +1,12 @@
-from pymavlink.dialects.v20 import common as mavlink2
+import json
 import math
 import os
 import socket
 import time
 
-# MAVLink 인코더(발신자) 생성
-mav = mavlink2.MAVLink(None)
 
-MAVLINK_SYS_ID = int(os.getenv("MAVLINK_SYS_ID", "1"))
-MAVLINK_COMP_ID = int(os.getenv("MAVLINK_COMP_ID", "1"))
+SYSTEM_ID = int(os.getenv("SYSTEM_ID", "1"))
+COMPONENT_ID = int(os.getenv("COMPONENT_ID", "1"))
 POSITION_OFFSET = float(os.getenv("POSITION_OFFSET", "0"))
 ALT_OFFSET = float(os.getenv("ALT_OFFSET", "0"))
 MOVEMENT_MODE = os.getenv("MOVEMENT_MODE", "linear").lower()
@@ -18,27 +16,19 @@ CIRCLE_RADIUS_METERS = float(os.getenv("CIRCLE_RADIUS_METERS", "250"))
 CIRCLE_PERIOD_STEPS = max(1, int(os.getenv("CIRCLE_PERIOD_STEPS", "120")))
 CIRCLE_START_DEGREES = float(os.getenv("CIRCLE_START_DEGREES", "0"))
 
-mav.srcSystem = MAVLINK_SYS_ID
-mav.srcComponent = MAVLINK_COMP_ID
-
-# 환경 변수에서 대상 IP/포트를 가져오기
 TARGET_IP = os.getenv("TARGET_IP", "udp-rx")
 TARGET_PORT = int(os.getenv("TARGET_PORT", "14550"))
+SEND_INTERVAL_SEC = float(os.getenv("SEND_INTERVAL_SEC", "0.2"))
+
 BASE_LAT = float(os.getenv("BASE_LAT", "37.5665"))
 BASE_LON = float(os.getenv("BASE_LON", "126.9780"))
 BASE_ALT = float(os.getenv("BASE_ALT", "50.0"))
+BASE_HEADING = float(os.getenv("BASE_HEADING", "166.97"))
+BASE_VA = float(os.getenv("BASE_VA", "0.0"))
+BATTERY_SOC = float(os.getenv("BATTERY_SOC", "0.9781"))
+BATTERY_VOLTAGE = float(os.getenv("BATTERY_VOLTAGE", "49.48"))
+VEHICLE_STATUS = os.getenv("VEHICLE_STATUS", "MC_FLYING")
 METERS_PER_DEGREE_LAT = 111_320
-
-
-def send_udp(payload: bytes, ip=None, port=None):
-    if ip is None:
-        ip = TARGET_IP
-    if port is None:
-        port = TARGET_PORT
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(payload, (ip, port))
-    sock.close()
 
 
 def meters_to_lon_degrees(meters: float, latitude: float) -> float:
@@ -48,7 +38,7 @@ def meters_to_lon_degrees(meters: float, latitude: float) -> float:
     return meters / scale
 
 
-def get_position(seq: int):
+def get_position(seq: int) -> tuple[float, float, float]:
     center_lat = BASE_LAT + POSITION_OFFSET
     center_lon = BASE_LON + POSITION_OFFSET
 
@@ -67,57 +57,48 @@ def get_position(seq: int):
     return lat, lon, alt
 
 
+def build_payload(seq: int, started_at: float) -> dict:
+    lat, lon, alt = get_position(seq)
+    return {
+        "system_id": SYSTEM_ID,
+        "component_id": COMPONENT_ID,
+        "simtime": round(time.monotonic() - started_at, 3),
+        "lla": [round(lat, 8), round(lon, 8), round(alt, 2)],
+        "relative_altitude": round(alt - BASE_ALT, 2),
+        "va": BASE_VA,
+        "heading": BASE_HEADING,
+        "battery": {
+            "soc": BATTERY_SOC,
+            "voltage": BATTERY_VOLTAGE,
+        },
+        "vehicle_status": VEHICLE_STATUS,
+    }
+
+
 def main():
     seq = 0
+    started_at = time.monotonic()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
     print(
-        f"[TX] sysid={MAVLINK_SYS_ID}, compid={MAVLINK_COMP_ID}, "
+        f"[TX] JSON UDP sysid={SYSTEM_ID}, compid={COMPONENT_ID}, "
         f"target={TARGET_IP}:{TARGET_PORT}, position_offset={POSITION_OFFSET}, "
         f"alt_offset={ALT_OFFSET}, movement_mode={MOVEMENT_MODE}"
     )
 
     while True:
-        hb = mav.heartbeat_encode(
-            type=mavlink2.MAV_TYPE_QUADROTOR,
-            autopilot=mavlink2.MAV_AUTOPILOT_ARDUPILOTMEGA,
-            base_mode=0,
-            custom_mode=0,
-            system_status=mavlink2.MAV_STATE_ACTIVE,
-        )
-        send_udp(hb.pack(mav))
+        payload = build_payload(seq, started_at)
+        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        sock.sendto(encoded, (TARGET_IP, TARGET_PORT))
 
-        att = mav.attitude_encode(
-            time_boot_ms=int(time.time() * 1000) & 0xFFFFFFFF,
-            roll=0.1,
-            pitch=0.05,
-            yaw=1.2,
-            rollspeed=0.0,
-            pitchspeed=0.0,
-            yawspeed=0.0,
-        )
-        send_udp(att.pack(mav))
-
-        # 위치 정보는 드론별 오프셋과 seq 기반으로 조금씩 변화시킨다.
-        lat, lon, alt = get_position(seq)
-
-        global_pos = mav.global_position_int_encode(
-            time_boot_ms=int(time.time() * 1000) & 0xFFFFFFFF,
-            lat=int(lat * 1e7),
-            lon=int(lon * 1e7),
-            alt=int(alt * 1000),
-            relative_alt=int(alt * 1000),
-            vx=0,
-            vy=0,
-            vz=0,
-            hdg=0,
-        )
-        send_udp(global_pos.pack(mav))
-
+        lat, lon, alt = payload["lla"]
         print(
-            f"[TX] sysid={MAVLINK_SYS_ID}, seq={seq}, target={TARGET_IP}:{TARGET_PORT}, "
-            f"lat={lat:.6f}, lon={lon:.6f}, alt={alt:.1f}m"
+            f"[TX] seq={seq}, target={TARGET_IP}:{TARGET_PORT}, "
+            f"lat={lat:.6f}, lon={lon:.6f}, alt={alt:.1f}m, "
+            f"status={payload['vehicle_status']}"
         )
         seq += 1
-        time.sleep(0.2)
+        time.sleep(SEND_INTERVAL_SEC)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ router = APIRouter(tags=["streams"])
 
 @router.get("/mavlink/latest")
 def get_latest_mavlink_message():
-    """일반 MAVLink 스트림의 최신 메시지 1건을 조회한다."""
+    """Return the latest drone telemetry message from the Redis Stream."""
     if not runtime.redis_client:
         return {"ok": False, "message": "Redis client not initialized"}
 

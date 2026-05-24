@@ -56,6 +56,10 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - STREAM_KEY=mystream
+      - JSON_SAMPLE_INTERVAL_SEC=2
+      - SIMTIME_UNIT=seconds
+      - DEFAULT_SYSTEM_ID=1
+      - DEFAULT_COMPONENT_ID=1
     command: python receiver.py
     networks:
       - app-network
@@ -71,11 +75,12 @@ services:
       - PYTHONUNBUFFERED=1
       - TARGET_IP=drone-telemetry-udp-rx  # Docker 네트워크에서 서비스 이름으로 접근
       - TARGET_PORT=14550
-      - MAVLINK_SYS_ID=1
-      - MAVLINK_COMP_ID=1
+      - SYSTEM_ID=1
+      - COMPONENT_ID=1
       - POSITION_OFFSET=0
       - ALT_OFFSET=0
       - MOVEMENT_MODE=linear
+      - VEHICLE_STATUS=MC_FLYING
     command: python transmitter.py
     networks:
       - app-network
@@ -91,13 +96,14 @@ services:
       - PYTHONUNBUFFERED=1
       - TARGET_IP=drone-telemetry-udp-rx
       - TARGET_PORT=14550
-      - MAVLINK_SYS_ID=2
-      - MAVLINK_COMP_ID=1
+      - SYSTEM_ID=2
+      - COMPONENT_ID=1
       - POSITION_OFFSET=0.006
       - ALT_OFFSET=10
       - MOVEMENT_MODE=circle
       - CIRCLE_RADIUS_METERS=300
       - CIRCLE_PERIOD_STEPS=180
+      - VEHICLE_STATUS=MC_FLYING
     command: python transmitter.py
     networks:
       - app-network

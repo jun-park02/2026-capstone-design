@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     서버 시작 시 Redis 스트림 컨슈머와 화재 감지 리스너를 시작하고,
     서버 종료 시 관련 리소스를 순서대로 종료한다.
     """
-    # MAVLink 메시지를 소비할 Redis 스트림 컨슈머를 생성하고 시작한다.
+    # Start the Redis Stream consumer for drone telemetry.
     runtime.consumer = RedisStreamConsumer(
         redis_host=os.getenv("REDIS_HOST", "redis"),
         redis_port=int(os.getenv("REDIS_PORT", "6379")),

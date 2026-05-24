@@ -6,7 +6,6 @@ from datetime import UTC, datetime, time as datetime_time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from pymavlink import mavutil
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,6 +21,9 @@ DRONE_STATUS_KEY_PREFIX = os.getenv("DRONE_STATUS_KEY_PREFIX", "drone:status")
 DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
 DRONE_PATH_KEY_PREFIX = os.getenv("DRONE_PATH_KEY_PREFIX", "drone:path")
 DEFAULT_ACTIVE_TIMEOUT_SEC = int(os.getenv("DRONE_ACTIVE_TIMEOUT_SEC", "5"))
+MAV_STATE_ACTIVE = 4
+MAV_STATE_CRITICAL = 5
+MAV_STATE_EMERGENCY = 6
 
 
 def _drone_status_key(drone_id: str) -> str:
@@ -130,7 +132,7 @@ def get_active_drone_count(
         except (TypeError, ValueError):
             continue
 
-        if system_status != mavutil.mavlink.MAV_STATE_ACTIVE:
+        if system_status != MAV_STATE_ACTIVE:
             continue
         if last_seen_ts < threshold_ts:
             continue
@@ -153,7 +155,7 @@ def list_drone_telemetry(
     limit: int = Query(100, ge=1, le=5000),
     session: Session = Depends(get_db_session),
 ):
-    """Return persisted MAVLink telemetry rows from MySQL."""
+    """Return persisted drone telemetry rows from MySQL."""
     stmt = select(DroneTelemetry).order_by(
         DroneTelemetry.telemetry_at.desc(),
         DroneTelemetry.id.desc(),
@@ -217,9 +219,9 @@ def list_today_drone_warning_error_messages(
                 system_status = int(data.get("system_status"))
             except (TypeError, ValueError):
                 system_status = None
-            if system_status == mavutil.mavlink.MAV_STATE_EMERGENCY:
+            if system_status == MAV_STATE_EMERGENCY:
                 message_level = "error"
-            elif system_status == mavutil.mavlink.MAV_STATE_CRITICAL:
+            elif system_status == MAV_STATE_CRITICAL:
                 message_level = "warning"
             if message_level:
                 message_text = data.get("system_status_name") or f"MAV_STATE={system_status}"
