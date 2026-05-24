@@ -59,10 +59,16 @@ def _today_kst() -> date:
 
 
 def _day_bounds_utc(tz_offset_hours: int = 9) -> tuple[datetime, datetime, str]:
+    # 기본값은 한국 시간(KST, UTC+9)이며, 해당 시간대 기준의 오늘 날짜를 구한다.
     tz = timezone(timedelta(hours=tz_offset_hours))
     today = datetime.now(UTC).astimezone(tz).date()
+
+    # 로컬 시간대 기준 오늘 00:00부터 내일 00:00 직전까지를 하루 범위로 잡는다.
     start_local = datetime.combine(today, datetime_time.min, tzinfo=tz)
     end_local = start_local + timedelta(days=1)
+
+    # DB의 naive UTC datetime과 비교하기 위해 UTC로 변환한 뒤 tzinfo를 제거한다.
+    # 세 번째 값은 응답에 표시할 로컬 날짜 문자열이다.
     return (
         start_local.astimezone(UTC).replace(tzinfo=None),
         end_local.astimezone(UTC).replace(tzinfo=None),
@@ -450,26 +456,27 @@ def _weekly_fire_data(session: Session, *, tz_offset_hours: int = 9) -> list[dic
 
 @router.get("/dashboard/summary")
 def get_dashboard_summary(
-    tz_offset_hours: int = Query(9, ge=-12, le=14),
     session: Session = Depends(get_db_session),
 ):
     """
-    Return the dashboard page's full data contract in one response.
-
-    The frontend currently expects this single shape, so this endpoint combines
-    fire-event aggregates, drone status, latest battery data, and map points.
+    대시보드 화면이 필요로 하는 전체 응답 데이터를 한 번에 반환
+    화재 이벤트 집계, 드론 상태, 최신 배터리 데이터, 지도 표시용 좌표를 함께 리턴
     """
-    today_start, today_end, target_date = _day_bounds_utc(tz_offset_hours)
+    # 한국 시간(KST, UTC+9) 기준 집계 범위와 최근 30일 통계 기준 시점을 계산한다.
+    today_start, today_end, target_date = _day_bounds_utc()
     evaluated_at = datetime.utcnow()
     recent_month_start = evaluated_at - timedelta(days=30)
 
+    # 메일 발송 후 아직 확인되지 않은 의심 이벤트 수
     active_suspects = _count_pending_suspected_events(session)
+    # 오늘 처리된 이벤트 수를 계산
     resolved_today = _count_fire_events_between(
         session=session,
         start_at=today_start,
         end_at=today_end,
         reviewed_only=True,
     )
+    # 오늘 사용자 확인 결과가 실제 화재(Y)로 확정된 이벤트 수
     active_fires = _count_fire_events_between(
         session=session,
         start_at=today_start,
@@ -477,6 +484,7 @@ def get_dashboard_summary(
         confirmation="Y",
     )
 
+    # 최근 30일 기준 전체 탐지, 실제 화재, 오탐지 건수를 계산한다.
     month_total = _count_fire_events_between(
         session=session,
         start_at=recent_month_start,
@@ -495,6 +503,7 @@ def get_dashboard_summary(
         confirmation="N",
     )
 
+    # Redis 캐시나 DB에서 드론 경로를 가져오고, 첫 번째 드론을 대표 위치로 사용한다.
     drone_paths = _dashboard_drone_paths(session)
     primary_path = drone_paths[0]["path"] if drone_paths else []
     primary_latest = drone_paths[0]["latest"] if drone_paths else None
@@ -503,12 +512,15 @@ def get_dashboard_summary(
         drone_lon = primary_latest["lon"]
         drone_alt = primary_latest.get("alt") or 0
     else:
+        # 아직 드론 좌표가 없으면 기본 지도 중심 좌표로 대체한다.
         drone_lat, drone_lon = DEFAULT_MAP_CENTER
         drone_alt = 0
 
+    # 최근 화재 위치 목록을 지도 마커로 사용하고, 없으면 드론 위치를 기본 화재 위치로 둔다.
     fire_locations = _recent_fire_positions(session)
     fire_location = fire_locations[0] if fire_locations else [drone_lat, drone_lon]
 
+    # 프론트 대시보드 컴포넌트가 바로 사용할 수 있는 형태로 지표와 지도 데이터를 묶어 반환한다.
     return {
         "ok": True,
         "date": target_date,
@@ -526,8 +538,8 @@ def get_dashboard_summary(
             "lng": drone_lon,
             "alt": drone_alt,
         },
-        "yearlyData": _monthly_fire_data(session, tz_offset_hours=tz_offset_hours),
-        "weeklyData": _weekly_fire_data(session, tz_offset_hours=tz_offset_hours),
+        "yearlyData": _monthly_fire_data(session),
+        "weeklyData": _weekly_fire_data(session),
         "pieData": [
             {"name": "실제 화재", "value": month_real},
             {"name": "오탐지", "value": month_false_positive},
