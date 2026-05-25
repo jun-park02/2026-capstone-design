@@ -13,10 +13,9 @@ UDP_BUFFER_SIZE = int(os.getenv("UDP_BUFFER_SIZE", "65535"))
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-STREAM_KEY = os.getenv("STREAM_KEY", "mystream")
+STREAM_KEY = os.getenv("STREAM_KEY", "drone_telemetry")
 
-DEFAULT_SYSTEM_ID = int(os.getenv("DEFAULT_SYSTEM_ID", os.getenv("SYSTEM_ID", "1")))
-DEFAULT_COMPONENT_ID = int(os.getenv("DEFAULT_COMPONENT_ID", os.getenv("COMPONENT_ID", "1")))
+DEFAULT_DRONE_ID = int(os.getenv("DEFAULT_DRONE_ID", "1"))
 DRONE_LAST_SEEN_KEY = os.getenv("DRONE_LAST_SEEN_KEY", "drone:last_seen")
 DRONE_STATUS_KEY_PREFIX = os.getenv("DRONE_STATUS_KEY_PREFIX", "drone:status")
 DRONE_STATUS_TTL_SEC = int(os.getenv("DRONE_STATUS_TTL_SEC", "86400"))
@@ -135,19 +134,10 @@ def get_mav_state_name(system_status: Any, vehicle_status: str | None = None) ->
 
 
 def get_system_id(packet: dict[str, Any]) -> int:
-    for key in ("system_id", "sysid", "drone_id"):
-        system_id = to_int(packet.get(key))
-        if system_id is not None:
-            return system_id
-    return DEFAULT_SYSTEM_ID
-
-
-def get_component_id(packet: dict[str, Any]) -> int:
-    for key in ("component_id", "compid"):
-        component_id = to_int(packet.get(key))
-        if component_id is not None:
-            return component_id
-    return DEFAULT_COMPONENT_ID
+    drone_id = to_int(packet.get("drone_id"))
+    if drone_id is not None:
+        return drone_id
+    return DEFAULT_DRONE_ID
 
 
 def first_present(packet: dict[str, Any], *keys: str) -> Any:
@@ -159,7 +149,7 @@ def first_present(packet: dict[str, Any], *keys: str) -> Any:
 
 def should_process_packet(
     last_processed_at: dict[int | str, float],
-    *,
+    *, # * 뒤의 인자들은 반드시 이름을 붙여서 전달하라는 의미
     system_id: int | None,
     now: float,
 ) -> bool:
@@ -178,6 +168,7 @@ def should_process_packet(
 def parse_udp_json(data: bytes) -> dict[str, Any]:
     text = data.decode("utf-8")
     packet = json.loads(text)
+    # 수신 데이터가 key-value 형태의 JSON 객체인지 확인
     if not isinstance(packet, dict):
         raise ValueError("UDP payload must be a JSON object")
     return packet
@@ -295,12 +286,19 @@ def build_heartbeat_message(packet: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def build_stream_messages(packet: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    # 드론 JSON 1개에서 위치, 속도, 배터리, 상태 정보를 각각 Redis Stream 메시지로 만듦
+
+    # build_global_position_message() -> 위치 메시지 dict: lat, lon, alt, relative_alt, heading, time_boot_ms
+    # build_vfr_hud_message() -> 속도/고도 메시지 dict: airspeed, groundspeed, heading, alt
+    # build_battery_status_message() -> 배터리 메시지 dict: battery_remaining, voltage_battery, soc
+    # build_heartbeat_message() -> 상태 메시지 dict: vehicle_status, armed, flight_enable, system_status
     candidates = [
         ("GLOBAL_POSITION_INT", build_global_position_message(packet)),
         ("VFR_HUD", build_vfr_hud_message(packet)),
         ("BATTERY_STATUS", build_battery_status_message(packet)),
         ("HEARTBEAT", build_heartbeat_message(packet)),
     ]
+    # 필요한 값이 없어 만들 수 없는 메시지는 None이므로 제외한다.
     return [(message_type, data) for message_type, data in candidates if data is not None]
 
 
@@ -310,7 +308,6 @@ def update_drone_status(
     msg_type: str,
     msg_dict: dict[str, Any],
     system_id: int | None,
-    component_id: int | None,
 ):
     if not redis_client or msg_type != "HEARTBEAT" or system_id is None:
         return
@@ -326,7 +323,6 @@ def update_drone_status(
         status_key,
         mapping={
             "system_id": system_id,
-            "component_id": component_id if component_id is not None else "",
             "message_type": msg_type,
             "vehicle_status": vehicle_status,
             "armed": "" if msg_dict.get("armed") is None else int(bool(msg_dict.get("armed"))),
@@ -346,8 +342,7 @@ def update_drone_status(
     pipe.execute()
 
     print(
-        f"[RX] Drone status updated: sysid={system_id} compid={component_id} "
-        f"status={vehicle_status}"
+        f"[RX] Drone status updated: drone_id={system_id} status={vehicle_status}"
     )
 
 
@@ -357,7 +352,6 @@ def publish_message(
     message_type: str,
     msg_dict: dict[str, Any],
     system_id: int,
-    component_id: int,
     src_ip: str,
     src_port: int,
 ) -> str:
@@ -365,7 +359,6 @@ def publish_message(
         "message_type": message_type,
         "timestamp": now_str(),
         "system_id": system_id,
-        "component_id": component_id,
         "src_ip": src_ip,
         "src_port": src_port,
         "data": json.dumps(msg_dict, ensure_ascii=False),
@@ -380,38 +373,39 @@ def publish_message(
 
 
 def main():
-    # Redis 연결을 먼저 시도한다. 실패해도 UDP 수신은 계속 수행한다.
+    # Redis 연결을 먼저 시도
     redis_client = create_redis_client()
-    print(f"[RX] UDP JSON receiver listening: {UDP_HOST}:{UDP_PORT}")
-    print(f"[RX] Redis Stream: {STREAM_KEY}")
-    print(f"[RX] JSON sample interval: {JSON_SAMPLE_INTERVAL_SEC}s")
-    print(f"[RX] simtime unit: {SIMTIME_UNIT}")
-    print(f"[RX] Drone status keys: {DRONE_LAST_SEEN_KEY}, {DRONE_STATUS_KEY_PREFIX}:<sysid>")
 
-    # 드론별 마지막 처리 시각을 저장해서 너무 잦은 패킷 저장을 제한한다.
+    print(f"[drone-telemetry-udp-rx] UDP JSON receiver listening: {UDP_HOST}:{UDP_PORT}")
+    print(f"[drone-telemetry-udp-rx] Redis Stream: {STREAM_KEY}")
+    print(f"[drone-telemetry-udp-rx] JSON sample interval: {JSON_SAMPLE_INTERVAL_SEC}s")
+    print(f"[drone-telemetry-udp-rx] Redis drone status keys: {DRONE_LAST_SEEN_KEY}, {DRONE_STATUS_KEY_PREFIX}:<drone_id>")
+
+    # 예{1: 12345.12, 2: 12348.75} 형태로 드론별 마지막 처리 시간을 저장
+    # 마지막 처리 시간은 time.monotonic() 함수로 구함
     last_processed_at: dict[int | str, float] = {}
 
-    # 표준 socket 라이브러리로 UDP 소켓을 열고 지정된 포트에 바인딩한다.
+    # 표준 socket 라이브러리로 UDP 소켓을 열고 지정된 포트에 바인딩
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_HOST, UDP_PORT))
 
     while True:
-        # recvfrom은 UDP 패킷 1개와 송신자 주소를 함께 반환한다.
+        # recvfrom은 UDP 패킷 1개와 송신자 주소를 함께 반환
+        # UDP_BUFFER_SIZE : 최대 몇 바이트까지 읽을지 정함
         data, address = sock.recvfrom(UDP_BUFFER_SIZE)
         src_ip, src_port = address
 
         try:
-            # 드론에서 보낸 바이트 데이터를 UTF-8 JSON 객체로 변환한다.
+            # 드론에서 보낸 바이트 데이터를 UTF-8 JSON 객체로 변환
             packet = parse_udp_json(data)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            print(f"[RX] Invalid JSON from {src_ip}:{src_port}: {exc}")
+        except Exception as e:
+            print(f"[drone-telemetry-udp-rx] Invalid JSON from {src_ip}:{src_port}: {e}")
             continue
 
-        # JSON에 system_id/component_id가 없으면 환경 변수의 기본값을 사용한다.
+        # JSON의 drone_id 값을 기존 백엔드 payload의 system_id로 사용
         system_id = get_system_id(packet)
-        component_id = get_component_id(packet)
 
-        # 같은 드론에서 너무 빠르게 들어오는 패킷은 샘플링 간격에 따라 건너뛴다.
+        # 같은 드론에서 너무 빠르게 들어오는 패킷은 샘플링 간격에 따라 건너뜀
         if not should_process_packet(
             last_processed_at,
             system_id=system_id,
@@ -419,18 +413,18 @@ def main():
         ):
             continue
 
-        # 수신한 JSON 1개를 위치, 속도, 배터리, 상태 메시지로 나누어 Redis에 저장한다.
+        # 수신한 JSON 1개를 위치, 속도, 배터리, 상태 메시지로 나누어 Redis에 저장
         messages = build_stream_messages(packet)
         if not messages:
-            print(f"[RX] No usable telemetry fields from {src_ip}:{src_port}: {packet}")
+            print(f"[drone-telemetry-udp-rx] No usable telemetry fields from {src_ip}:{src_port}: {packet}")
             continue
 
         print(
-            f"[RX] JSON sysid={system_id} compid={component_id} "
-            f"src={src_ip}:{src_port}: {packet}"
+            f"[drone-telemetry-udp-rx] JSON drone_id={system_id} src={src_ip}:{src_port}: {packet}"
         )
 
         if not redis_client:
+            redis_client = create_redis_client()
             continue
 
         for message_type, msg_dict in messages:
@@ -441,7 +435,6 @@ def main():
                     msg_type=message_type,
                     msg_dict=msg_dict,
                     system_id=system_id,
-                    component_id=component_id,
                 )
 
                 # 기존 백엔드 소비자가 읽는 Redis Stream payload 형식으로 발행한다.
@@ -450,13 +443,12 @@ def main():
                     message_type=message_type,
                     msg_dict=msg_dict,
                     system_id=system_id,
-                    component_id=component_id,
                     src_ip=src_ip,
                     src_port=src_port,
                 )
-                print(f"[RX] Redis Stream saved: {msg_id} type={message_type}")
+                print(f"[drone-telemetry-udp-rx] Redis Stream saved: {msg_id} type={message_type}")
             except Exception as exc:
-                print(f"[RX] Redis save failed: {exc}")
+                print(f"[drone-telemetry-udp-rx] Redis save failed: {exc}")
 
 
 if __name__ == "__main__":

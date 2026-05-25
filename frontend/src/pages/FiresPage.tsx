@@ -42,7 +42,6 @@ interface BackendFireEventDetail {
   detected_drone?: {
     system_id?: number | string | null;
     src_ip?: string | null;
-    src_port?: number | string | null;
   } | null;
   confidence?: number | string | null;
   image_url?: string | null;

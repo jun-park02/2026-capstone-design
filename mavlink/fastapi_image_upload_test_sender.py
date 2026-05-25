@@ -7,17 +7,28 @@ from pathlib import Path
 from urllib import error, request
 
 
+# 업로드 테스트에 사용할 로컬 이미지 파일 경로
 IMAGE_PATH = Path(os.getenv("IMAGE_PATH", r"C:\test\123123123123123.jpg"))
+# 이미지를 보낼 FastAPI 업로드 엔드포인트 URL
 TARGET_URL = os.getenv("TARGET_URL", "http://127.0.0.1:14551/fire-detections/upload")
 
+# 테스트 화재 이벤트 ID
 EVENT_ID = os.getenv("EVENT_ID", f"evt-{uuid.uuid4().hex[:12]}")
+# 테스트 이미지 ID
 IMAGE_ID = os.getenv("IMAGE_ID", f"img-{uuid.uuid4().hex[:12]}")
+# 이미지 촬영 시각
 CAPTURED_AT = os.getenv("CAPTURED_AT", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 1)))
+# 화재 감지 위치의 위도
 LAT = os.getenv("LAT", "37.5665")
+# 화재 감지 위치의 경도
 LON = os.getenv("LON", "126.9480")
+# 화재 감지 위치의 고도
 ALT = os.getenv("ALT", "50.0")
+# 화재 감지 신뢰도
 CONFIDENCE = os.getenv("CONFIDENCE", "0.9")
+# 화재를 감지한 드론 ID
 SYSTEM_ID = os.getenv("SYSTEM_ID", "1")
+# 업로드 요청 응답을 기다릴 최대 시간
 REQUEST_TIMEOUT_SEC = float(os.getenv("REQUEST_TIMEOUT_SEC", "30"))
 
 

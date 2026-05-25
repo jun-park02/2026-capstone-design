@@ -11,13 +11,21 @@ import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 
 
+# Redis 서버 주소
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+# Redis 서버 포트
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+# 업로드 완료 이벤트를 발행할 Redis Stream 키
 STREAM_KEY = os.getenv("STREAM_KEY", "fire_detect")
+# 업로드된 이미지를 저장할 컨테이너 내부 경로
 IMAGE_SAVE_DIR = os.getenv("IMG_SAVE_DIR", "/app/images")
+# FastAPI 업로드 서버가 바인딩할 주소
 HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
+# FastAPI 업로드 서버가 바인딩할 포트
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8000"))
+# 허용할 최대 이미지 업로드 크기
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+# 업로드를 허용할 이미지 확장자 목록
 ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 
 
@@ -64,13 +72,18 @@ def now_str() -> str:
 
 
 def normalize_image_format(value: Any, filename: str | None = None, content_type: str | None = None) -> str:
+    # form-data의 image_format 값을 먼저 사용하고, 앞의 점과 대소문자를 정리한다.
     image_format = str(value or "").strip().lower().lstrip(".")
+    # image_format이 없으면 업로드 파일명 확장자에서 이미지 형식을 추출한다.
     if not image_format and filename:
         image_format = Path(filename).suffix.lower().lstrip(".")
+    # 파일명에서도 얻지 못하면 Content-Type 값에서 이미지 형식을 추출한다.
     if not image_format and content_type:
         image_format = content_type.split("/")[-1].lower()
+    # jpeg와 jpg는 같은 형식으로 취급하기 위해 jpg로 통일한다.
     if image_format == "jpeg":
         image_format = "jpg"
+    # 허용하지 않는 이미지 형식이면 요청을 거절한다.
     if image_format not in ALLOWED_IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="unsupported image format")
     return image_format
@@ -158,19 +171,25 @@ async def upload_fire_detection(
     system_id: str | None = Form(None, examples=["1"]),
     image_format: str | None = Form(None, examples=["jpg"]),
 ):
+    # 요청으로 받은 이미지 형식을 허용된 확장자로 정규화한다.
     image_ext = normalize_image_format(image_format, image.filename, image.content_type)
+    # event_id와 image_id가 없으면 테스트용 ID를 생성하고, 파일명에 안전한 형태로 정리한다.
     normalized_event_id = safe_id(event_id or f"fire-{int(time.time() * 1000)}")
     normalized_image_id = safe_id(image_id or uuid.uuid4().hex[:12])
+    # 이벤트 ID와 이미지 ID를 조합해서 저장할 이미지 파일명을 만든다.
     image_name = f"{normalized_event_id}_{normalized_image_id}.{image_ext}"
+    # 컨테이너 내부 이미지 저장 경로를 만든다.
     image_path = Path(IMAGE_SAVE_DIR) / image_name
 
+    # 업로드된 이미지를 로컬 공유 볼륨에 저장한다.
     image_size_bytes = await save_upload_file(image, image_path)
     if image_size_bytes <= 0:
         image_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="uploaded image is empty")
 
+    # 요청을 보낸 클라이언트 IP를 payload에 남긴다.
     client_host = request.client.host if request.client else None
-    client_port = request.client.port if request.client else None
+    # 백엔드 FireDetectListener가 처리할 수 있도록 Redis Stream에 넣을 payload를 만든다.
     payload = {
         "received_at": now_str(),
         "event_id": normalized_event_id,
@@ -182,19 +201,18 @@ async def upload_fire_detection(
         "confidence": confidence,
         "system_id": system_id,
         "image_format": image_ext,
-        "chunk_total": 1,
         "image_name": image_name,
         "image_path": str(image_path),
         "image_size_bytes": image_size_bytes,
         "src_ip": client_host,
-        "src_port": client_port,
-        "dst_port": HTTP_PORT,
         "upload_method": "http_multipart",
         "original_filename": image.filename,
         "content_type": image.content_type,
     }
+    # 이미지 저장 완료 이벤트를 Redis Stream에 발행한다.
     msg_id = publish_completed_event(payload)
 
+    # 업로드 요청을 보낸 클라이언트에게 처리 결과를 반환한다.
     return {
         "ok": True,
         "id": msg_id,
@@ -207,4 +225,4 @@ async def upload_fire_detection(
 
 
 if __name__ == "__main__":
-    uvicorn.run("raw_receiver:app", host=HTTP_HOST, port=HTTP_PORT)
+    uvicorn.run("fastapi_image_upload:app", host=HTTP_HOST, port=HTTP_PORT)

@@ -71,7 +71,6 @@ def _detected_drone(event: FireEvent) -> dict:
     return {
         "system_id": system_id,
         "src_ip": event.src_ip,
-        "src_port": event.src_port,
     }
 
 
@@ -679,7 +678,6 @@ def update_fire_event_status(
                         "detected_drone": {
                             "system_id": 1,
                             "src_ip": "192.168.0.10",
-                            "src_port": 14550,
                         },
                         "confidence": 0.92,
                         "image_url": "https://example-bucket.s3.amazonaws.com/fire/fire-1714287600000.jpg",

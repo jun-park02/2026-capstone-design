@@ -20,7 +20,7 @@ def get_latest_mavlink_message():
     if not runtime.redis_client:
         return {"ok": False, "message": "Redis client not initialized"}
 
-    stream_key = os.getenv("STREAM_KEY", "mystream")
+    stream_key = os.getenv("STREAM_KEY", "drone_telemetry")
     entries = runtime.redis_client.xrevrange(stream_key, count=1)
     if not entries:
         return {"ok": True, "message": "No messages in stream", "data": None}

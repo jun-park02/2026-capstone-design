@@ -131,7 +131,7 @@ class RedisStreamConsumer:
         self,
         redis_host: Optional[str] = None,
         redis_port: int = 6379,
-        stream_key: str = "mystream",
+        stream_key: str = "drone_telemetry",
         group: str = "mygroup",
         consumer: Optional[str] = None,
         batch_size: int = 100  # 한 번에 가져올 메시지 수

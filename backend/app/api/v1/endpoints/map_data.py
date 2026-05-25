@@ -14,7 +14,7 @@ from app.models import FireEvent
 
 router = APIRouter(tags=["map"])
 
-DEFAULT_DRONE_STREAM_KEY = os.getenv("STREAM_KEY", "mystream")
+DEFAULT_DRONE_STREAM_KEY = os.getenv("STREAM_KEY", "drone_telemetry")
 DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
 DRONE_PATH_KEY_PREFIX = os.getenv("DRONE_PATH_KEY_PREFIX", "drone:path")
 

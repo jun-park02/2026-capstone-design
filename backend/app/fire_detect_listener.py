@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import mimetypes
 import os
@@ -184,8 +183,6 @@ class FireDetectListener:
             "s3_bucket": bucket,
             "s3_object_key": object_key,
             "s3_image_url": self._build_s3_url(bucket, object_key),
-            "s3_etag": response.get("ETag"),
-            "s3_object_version_id": response.get("VersionId"),
             "s3_upload_status": "uploaded",
             "s3_upload_error": None,
         }
@@ -195,8 +192,6 @@ class FireDetectListener:
             f"image_id={payload.get('image_id')} "
             f"bucket={bucket} "
             f"object_key={object_key} "
-            f"etag={response.get('ETag')} "
-            f"version_id={response.get('VersionId')} "
             f"url={s3_meta['s3_image_url']}"
         )
         return s3_meta, image_bytes
@@ -226,8 +221,6 @@ class FireDetectListener:
             event.alt = self._to_decimal(payload.get("alt"))
             event.confidence = self._to_decimal(payload.get("confidence"))
             event.src_ip = payload.get("src_ip")
-            event.src_port = payload.get("src_port")
-            event.dst_port = payload.get("dst_port")
 
             stored_payload = dict(payload)
             if s3_meta:
@@ -260,25 +253,16 @@ class FireDetectListener:
             )
             image.content_type = mimetypes.guess_type(local_path)[0]
             image.file_size_bytes = len(image_bytes) if image_bytes is not None else os.path.getsize(local_path)
-            image.checksum_sha256 = (
-                hashlib.sha256(image_bytes).hexdigest() if image_bytes is not None else None
-            )
-            image.chunk_total = payload.get("chunk_total")
-            image.storage_provider = "s3"
 
             if s3_meta:
                 image.bucket = s3_meta.get("s3_bucket")
                 image.object_key = s3_meta.get("s3_object_key")
-                image.object_version_id = s3_meta.get("s3_object_version_id")
-                image.etag = s3_meta.get("s3_etag")
                 image.upload_status = "uploaded"
                 image.upload_error = None
                 image.uploaded_at = datetime.utcnow()
             else:
                 image.bucket = None
                 image.object_key = None
-                image.object_version_id = None
-                image.etag = None
                 image.upload_status = "failed"
                 image.upload_error = upload_error
                 image.uploaded_at = None
