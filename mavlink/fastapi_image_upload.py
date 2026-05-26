@@ -94,6 +94,48 @@ def safe_id(value: str) -> str:
     return cleaned[:80] or uuid.uuid4().hex
 
 
+def first_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def parse_metadata(metadata: str | None) -> dict[str, Any]:
+    if not metadata:
+        return {}
+
+    try:
+        parsed = json.loads(metadata)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="metadata must be valid JSON") from exc
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="metadata must be a JSON object")
+    return parsed
+
+
+def metadata_value(source: Any, *keys: str) -> Any:
+    if not isinstance(source, dict):
+        return None
+
+    for key in keys:
+        value = source.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def normalize_captured_at(value: Any) -> Any:
+    if value is None or value == "":
+        return None
+
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))
+    except (TypeError, ValueError):
+        return str(value)
+
+
 async def save_upload_file(upload: UploadFile, image_path: Path) -> int:
     size = 0
     with image_path.open("wb") as output:
@@ -160,7 +202,9 @@ def health():
 @app.post("/fire-detections/upload")
 async def upload_fire_detection(
     request: Request,
-    image: UploadFile = File(...),
+    rgb_image: UploadFile | None = File(None, alias="RGB_image"),
+    ir_image: UploadFile | None = File(None, alias="IR_image"),
+    metadata: str | None = Form(None),
     event_id: str | None = Form(None, examples=["fire-test-001"]),
     image_id: str | None = Form(None, examples=["img-test-001"]),
     captured_at: str | None = Form(None, examples=["2026-04-28T12:30:00"]),
@@ -171,8 +215,24 @@ async def upload_fire_detection(
     system_id: str | None = Form(None, examples=["1"]),
     image_format: str | None = Form(None, examples=["jpg"]),
 ):
+    print(rgb_image)
+
+    metadata_obj = parse_metadata(metadata)
+    gps = metadata_obj.get("gps")
+    detection = metadata_obj.get("detection")
+    if rgb_image is None:
+        raise HTTPException(status_code=400, detail="RGB_image file is required")
+
+    captured_at = first_value(captured_at, normalize_captured_at(metadata_obj.get("timestamp")))
+
+    lat = gps.get("Latitude") if type(gps) is not str else 0
+    lon = gps.get("Longitude") if type(gps) is not str else 0
+    alt = first_value(alt, metadata_value(gps, "Altitude", "altitude", "alt"))
+    
+    confidence = first_value(confidence, metadata_value(detection, "confidence", "Confidence", "score", "Score"))
+
     # 요청으로 받은 이미지 형식을 허용된 확장자로 정규화한다.
-    image_ext = normalize_image_format(image_format, image.filename, image.content_type)
+    image_ext = normalize_image_format(image_format, rgb_image.filename, rgb_image.content_type)
     # event_id와 image_id가 없으면 테스트용 ID를 생성하고, 파일명에 안전한 형태로 정리한다.
     normalized_event_id = safe_id(event_id or f"fire-{int(time.time() * 1000)}")
     normalized_image_id = safe_id(image_id or uuid.uuid4().hex[:12])
@@ -182,7 +242,7 @@ async def upload_fire_detection(
     image_path = Path(IMAGE_SAVE_DIR) / image_name
 
     # 업로드된 이미지를 로컬 공유 볼륨에 저장한다.
-    image_size_bytes = await save_upload_file(image, image_path)
+    image_size_bytes = await save_upload_file(rgb_image, image_path)
     if image_size_bytes <= 0:
         image_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="uploaded image is empty")
@@ -206,8 +266,8 @@ async def upload_fire_detection(
         "image_size_bytes": image_size_bytes,
         "src_ip": client_host,
         "upload_method": "http_multipart",
-        "original_filename": image.filename,
-        "content_type": image.content_type,
+        "original_filename": rgb_image.filename,
+        "content_type": rgb_image.content_type,
     }
     # 이미지 저장 완료 이벤트를 Redis Stream에 발행한다.
     msg_id = publish_completed_event(payload)

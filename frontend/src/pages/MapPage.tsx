@@ -5,15 +5,7 @@ import { Navigation, Flame, Battery } from 'lucide-react';
 import L from 'leaflet';
 import { USE_MOCK_DATA, apiClient } from '../api/config';
 
-const DRONE_ICON_URL = '/icons/drone.svg';
-
-const droneIcon = new L.Icon({
-  iconUrl: DRONE_ICON_URL,
-  iconSize: [44, 44],
-  iconAnchor: [22, 22],
-  popupAnchor: [0, -22],
-  className: 'drone-map-icon',
-});
+const DRONE_FOCUS_ZOOM = 16;
 
 const fireIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
@@ -31,6 +23,7 @@ interface Drone {
   lat: number;
   lng: number;
   alt: number | null;
+  heading: number | null;
   battery: number | null;
   status: '정상' | '경고';
 }
@@ -49,12 +42,18 @@ interface BackendDronePoint {
   lat?: number | string | null;
   lon?: number | string | null;
   alt?: number | string | null;
+  heading?: number | string | null;
   position?: unknown;
 }
 
 interface BackendDronePath {
   drone_id?: string | number | null;
   system_id?: number | string | null;
+  battery_remaining?: number | string | null;
+  voltage_battery?: number | string | null;
+  current_battery?: number | string | null;
+  battery_soc?: number | string | null;
+  battery_telemetry_at?: string | null;
   path?: BackendDronePoint[];
   positions?: unknown[];
   latest?: BackendDronePoint | null;
@@ -76,9 +75,9 @@ interface MapOverviewResponse {
 }
 
 const mockDrones: Drone[] = [
-  { id: 'DRN-01', lat: 37.5665, lng: 126.9780, alt: 120, battery: 85, status: '정상' },
-  { id: 'DRN-02', lat: 37.5700, lng: 126.9820, alt: 110, battery: 42, status: '경고' },
-  { id: 'DRN-03', lat: 37.5600, lng: 126.9900, alt: 130, battery: 90, status: '정상' },
+  { id: 'DRN-01', lat: 37.5665, lng: 126.9780, alt: 120, heading: 35, battery: 85, status: '정상' },
+  { id: 'DRN-02', lat: 37.5700, lng: 126.9820, alt: 110, heading: 125, battery: 42, status: '경고' },
+  { id: 'DRN-03', lat: 37.5600, lng: 126.9900, alt: 130, heading: 285, battery: 90, status: '정상' },
 ];
 
 const mockFires: FireMarker[] = [
@@ -110,6 +109,38 @@ const mockDronePaths: DronePaths = {
 const DRONE_PATH_COLORS = ['#2563eb', '#0f766e', '#f97316', '#7c3aed', '#db2777'];
 
 const getDronePathColor = (index: number) => DRONE_PATH_COLORS[index % DRONE_PATH_COLORS.length];
+
+const normalizeHeading = (heading: number | null) => {
+  if (heading === null) {
+    return 0;
+  }
+
+  return ((heading % 360) + 360) % 360;
+};
+
+const formatHeading = (heading: number | null) => (
+  heading === null ? '-' : `${Math.round(normalizeHeading(heading))} deg`
+);
+
+const formatBattery = (battery: number | null) => (
+  battery === null ? '-' : `${Math.round(battery)}%`
+);
+
+const createDroneIcon = (heading: number | null) => {
+  const rotation = normalizeHeading(heading);
+
+  return L.divIcon({
+    className: 'drone-heading-marker',
+    iconSize: [44, 44],
+    iconAnchor: [22, 22],
+    popupAnchor: [0, -22],
+    html: `
+      <div class="drone-heading-icon" style="--drone-heading: ${rotation}deg">
+        <span class="drone-heading-chevron">^</span>
+      </div>
+    `,
+  });
+};
 
 const toNumber = (value: unknown): number | null => {
   if (value === null || value === undefined || value === '') {
@@ -187,6 +218,8 @@ const transformOverview = (overview: MapOverviewResponse) => {
 
       const id = String(dronePath.drone_id ?? dronePath.system_id ?? `DRN-${index + 1}`);
       const latestAlt = toNumber(dronePath.latest?.alt);
+      const latestHeading = toNumber(dronePath.latest?.heading);
+      const latestBattery = toNumber(dronePath.battery_remaining);
       nextDronePaths[id] = path.length > 0 ? path : [latestPoint];
 
       return {
@@ -194,7 +227,8 @@ const transformOverview = (overview: MapOverviewResponse) => {
         lat: latestPoint[0],
         lng: latestPoint[1],
         alt: latestAlt,
-        battery: null,
+        heading: latestHeading,
+        battery: latestBattery,
         status: '정상' as const,
       };
     })
@@ -243,6 +277,23 @@ const MapAutoFit: React.FC<{ points: Coordinate[] }> = ({ points }) => {
   return null;
 };
 
+const DroneFocus: React.FC<{ drone: Drone | null }> = ({ drone }) => {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!drone) {
+      return;
+    }
+
+    map.flyTo([drone.lat, drone.lng], DRONE_FOCUS_ZOOM, {
+      animate: true,
+      duration: 0.8,
+    });
+  }, [map, drone]);
+
+  return null;
+};
+
 export const MapPage: React.FC = () => {
   const [activeDrone, setActiveDrone] = useState<string | null>(null);
   const [drones, setDrones] = useState<Drone[]>(USE_MOCK_DATA ? mockDrones : []);
@@ -282,6 +333,13 @@ export const MapPage: React.FC = () => {
     const firePoints = fires.map((fire) => [fire.lat, fire.lng] as Coordinate);
     return [...pathPoints, ...firePoints];
   }, [dronePaths, fires]);
+  const selectedDrone = useMemo(
+    () => drones.find((drone) => drone.id === activeDrone) ?? null,
+    [activeDrone, drones],
+  );
+  const toggleActiveDrone = (droneId: string) => {
+    setActiveDrone((currentDroneId) => (currentDroneId === droneId ? null : droneId));
+  };
 
   return (
     <div className="h-[calc(100vh-6rem)] flex flex-col space-y-4">
@@ -290,7 +348,7 @@ export const MapPage: React.FC = () => {
         <div className="flex items-center gap-2">
           {loadError && <span className="text-sm text-red-600">{loadError}</span>}
           <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-md shadow-sm border border-slate-200 text-sm">
-            <img src={DRONE_ICON_URL} alt="drone" className="w-4 h-4" />
+            <span className="drone-heading-count-icon" aria-hidden="true">^</span>
             <span>드론 ({drones.length})</span>
           </div>
           <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-md shadow-sm border border-slate-200 text-sm">
@@ -314,7 +372,7 @@ export const MapPage: React.FC = () => {
                 <div
                   key={drone.id}
                   className={`p-4 hover:bg-slate-50 cursor-pointer transition-colors ${activeDrone === drone.id ? 'bg-blue-50 border-l-4 border-blue-500' : ''}`}
-                  onClick={() => setActiveDrone(drone.id)}
+                  onClick={() => toggleActiveDrone(drone.id)}
                 >
                   <div className="flex justify-between items-center mb-2">
                     <span className="font-semibold text-slate-800">{drone.id}</span>
@@ -325,9 +383,10 @@ export const MapPage: React.FC = () => {
                   <div className="grid grid-cols-2 gap-2 text-sm text-slate-600">
                     <div className="flex items-center gap-1">
                       <Battery size={14} />
-                      {drone.battery === null ? '-' : `${drone.battery}%`}
+                      {formatBattery(drone.battery)}
                     </div>
                     <div>고도: {drone.alt === null ? '-' : `${drone.alt}m`}</div>
+                    <div>헤딩: {formatHeading(drone.heading)}</div>
                   </div>
                 </div>
               ))}
@@ -343,6 +402,7 @@ export const MapPage: React.FC = () => {
             zoomControl={false}
           >
             <MapAutoFit points={mapFitPoints} />
+            <DroneFocus drone={selectedDrone} />
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
@@ -370,14 +430,15 @@ export const MapPage: React.FC = () => {
             })}
 
             {drones.map((drone) => (
-              <Marker key={drone.id} position={[drone.lat, drone.lng]} icon={droneIcon}>
+              <Marker key={drone.id} position={[drone.lat, drone.lng]} icon={createDroneIcon(drone.heading)}>
                 <Popup className="rounded-lg">
                   <div className="p-1">
                     <h4 className="font-bold text-slate-800 border-b pb-1 mb-2">{drone.id}</h4>
                     <div className="space-y-1 text-sm">
                       <p><span className="text-slate-500">상태:</span> <span className={drone.status === '정상' ? 'text-green-600 font-medium' : 'text-orange-600 font-medium'}>{drone.status}</span></p>
-                      <p><span className="text-slate-500">배터리:</span> {drone.battery === null ? '-' : `${drone.battery}%`}</p>
+                      <p><span className="text-slate-500">배터리:</span> {formatBattery(drone.battery)}</p>
                       <p><span className="text-slate-500">고도:</span> {drone.alt === null ? '-' : `${drone.alt}m`}</p>
+                      <p><span className="text-slate-500">헤딩:</span> {formatHeading(drone.heading)}</p>
                       <p><span className="text-slate-500">위치:</span> {drone.lat.toFixed(4)}, {drone.lng.toFixed(4)}</p>
                     </div>
                   </div>

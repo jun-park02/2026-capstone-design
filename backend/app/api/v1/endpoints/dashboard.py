@@ -385,12 +385,21 @@ def _dashboard_drone_paths(session: Session) -> list[dict[str, Any]]:
     return _db_drone_paths(session)
 
 
-def _recent_fire_positions(session: Session, *, limit: int = 100) -> list[list[float]]:
+def _recent_fire_positions(
+    session: Session,
+    *,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    limit: int = 100,
+) -> list[list[float]]:
+    stmt = select(FireEvent).where(FireEvent.lat.is_not(None), FireEvent.lon.is_not(None))
+    if start_at is not None:
+        stmt = stmt.where(FireEvent.received_at >= start_at)
+    if end_at is not None:
+        stmt = stmt.where(FireEvent.received_at < end_at)
+
     events = session.scalars(
-        select(FireEvent)
-        .where(FireEvent.lat.is_not(None), FireEvent.lon.is_not(None))
-        .order_by(FireEvent.received_at.desc(), FireEvent.id.desc())
-        .limit(limit)
+        stmt.order_by(FireEvent.received_at.desc(), FireEvent.id.desc()).limit(limit)
     ).all()
 
     positions = []
@@ -518,9 +527,12 @@ def get_dashboard_summary(
         drone_lat, drone_lon = DEFAULT_MAP_CENTER
         drone_alt = 0
 
-    # 최근 화재 위치 목록을 지도 마커로 사용하고, 없으면 드론 위치를 기본 화재 위치로 둔다.
-    fire_locations = _recent_fire_positions(session)
-    fire_location = fire_locations[0] if fire_locations else [drone_lat, drone_lon]
+    # 오늘 발생한 실제 화재 위치 목록만 지도 마커로 사용한다.
+    fire_locations = _recent_fire_positions(
+        session,
+        start_at=today_start,
+        end_at=today_end,
+    )
 
     # 프론트 대시보드 컴포넌트가 바로 사용할 수 있는 형태로 지표와 지도 데이터를 묶어 반환한다.
     return {
@@ -547,7 +559,6 @@ def get_dashboard_summary(
             {"name": "오탐지", "value": month_false_positive},
         ],
         "dronePath": [point["position"] for point in primary_path],
-        "fireLocation": fire_location,
         "fireLocations": fire_locations,
         "monthTotal": month_total,
         "monthReal": month_real,

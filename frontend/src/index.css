@@ -26,6 +26,46 @@ body {
   z-index: 0;
 }
 
-.drone-map-icon {
+.drone-heading-marker {
+  background: transparent;
+  border: 0;
+}
+
+.drone-heading-icon {
+  align-items: center;
+  background: #ffffff;
+  border: 2px solid #2563eb;
+  border-radius: 9999px;
+  color: #2563eb;
+  display: flex;
   filter: drop-shadow(0 6px 8px rgb(15 23 42 / 0.24));
+  font-family: Arial, sans-serif;
+  font-size: 32px;
+  font-weight: 800;
+  height: 40px;
+  justify-content: center;
+  line-height: 1;
+  transform: rotate(var(--drone-heading, 0deg));
+  transform-origin: center;
+  width: 40px;
+}
+
+.drone-heading-chevron {
+  display: block;
+  transform: translateY(5px);
+}
+
+.drone-heading-count-icon {
+  align-items: center;
+  border: 1.5px solid #2563eb;
+  border-radius: 9999px;
+  color: #2563eb;
+  display: inline-flex;
+  font-family: Arial, sans-serif;
+  font-size: 16px;
+  font-weight: 800;
+  height: 18px;
+  justify-content: center;
+  line-height: 1;
+  width: 18px;
 }

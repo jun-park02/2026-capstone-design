@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { USE_MOCK_DATA, apiClient } from '../api/config';
@@ -56,7 +56,6 @@ const mockDashboardData = {
     [37.5750, 126.9800],
     [37.5800, 126.9850],
   ] as [number, number][],
-  fireLocation: [37.5750, 126.9800] as [number, number],
   fireLocations: [
     [37.5750, 126.9800],
     [37.5770, 126.9825],
@@ -123,8 +122,8 @@ export const Dashboard: React.FC = () => {
     );
   }
 
-  const fireLocations = data.fireLocations?.length ? data.fireLocations : [data.fireLocation];
-  const mapFitPoints = [...data.dronePath, ...fireLocations];
+  const fireLocations = data.fireLocations ?? [];
+  const mapCenter: Coordinate = fireLocations[0] ?? [data.droneLocation.lat, data.droneLocation.lng];
 
   return (
     <div className="space-y-6">
@@ -253,16 +252,15 @@ export const Dashboard: React.FC = () => {
         {/* 미니 지도 */}
         <Card className="lg:col-span-2 flex flex-col">
           <CardHeader>
-            <CardTitle className="text-lg font-semibold text-slate-800">오늘의 비행 경로 및 화재 탐지 위치</CardTitle>
+            <CardTitle className="text-lg font-semibold text-slate-800">오늘의 화재 탐지 위치</CardTitle>
           </CardHeader>
           <CardContent className="flex-1 p-0 overflow-hidden rounded-b-xl min-h-[300px]">
-            <MapContainer center={data.fireLocation} zoom={14} scrollWheelZoom={false} className="h-full w-full z-0">
-              <MapAutoFit points={mapFitPoints} />
+            <MapContainer center={mapCenter} zoom={14} scrollWheelZoom={false} className="h-full w-full z-0">
+              <MapAutoFit points={fireLocations} />
               <TileLayer
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                 url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
               />
-              <Polyline positions={data.dronePath} color="#3b82f6" weight={3} dashArray="5, 10" />
               {fireLocations.map((fireLocation, index) => (
                 <Marker key={`${fireLocation[0]}-${fireLocation[1]}-${index}`} position={fireLocation} icon={fireIcon}>
                   <Popup>

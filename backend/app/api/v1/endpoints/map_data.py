@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import runtime
 from app.db import get_db_session
-from app.models import FireEvent
+from app.models import DroneTelemetry, FireEvent
 
 
 router = APIRouter(tags=["map"])
@@ -259,6 +259,66 @@ def _get_drone_paths(
     }
 
 
+def _get_latest_battery_by_drone(
+    *,
+    session: Session,
+    system_id: int | None,
+    limit: int = 500,
+) -> dict[str, dict[str, Any]]:
+    stmt = (
+        select(DroneTelemetry)
+        .where(DroneTelemetry.message_type.in_(["SYS_STATUS", "BATTERY_STATUS"]))
+        .order_by(DroneTelemetry.telemetry_at.desc(), DroneTelemetry.id.desc())
+    )
+    if system_id is not None:
+        stmt = stmt.where(DroneTelemetry.system_id == system_id)
+    stmt = stmt.limit(limit)
+
+    latest_by_drone: dict[str, dict[str, Any]] = {}
+    for row in session.scalars(stmt).all():
+        drone_id = str(row.system_id) if row.system_id is not None else "unknown"
+        if drone_id in latest_by_drone:
+            continue
+
+        payload = row.raw_payload if isinstance(row.raw_payload, dict) else {}
+        data = _parse_json(payload.get("data"))
+        data = data if isinstance(data, dict) else {}
+        battery_remaining = _to_float(data.get("battery_remaining"))
+        voltage_battery = _to_float(data.get("voltage_battery"))
+        current_battery = _to_float(data.get("current_battery"))
+        battery_soc = _to_float(data.get("soc"))
+        if (
+            battery_remaining is None
+            and voltage_battery is None
+            and current_battery is None
+            and battery_soc is None
+        ):
+            continue
+
+        latest_by_drone[drone_id] = {
+            "battery_remaining": battery_remaining,
+            "voltage_battery": voltage_battery,
+            "current_battery": current_battery,
+            "battery_soc": battery_soc,
+            "battery_telemetry_at": _serialize_datetime(row.telemetry_at),
+        }
+
+    return latest_by_drone
+
+
+def _merge_drone_batteries(
+    drones: list[dict[str, Any]],
+    batteries_by_drone: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **drone,
+            **batteries_by_drone.get(str(drone.get("drone_id")), {}),
+        }
+        for drone in drones
+    ]
+
+
 def _get_fire_detections(
     *,
     session: Session,
@@ -348,6 +408,8 @@ def get_map_overview(
         stream_key=stream_key,
     )
     fire_detections = _get_fire_detections(session=session, limit=fire_limit, confirmation=confirmation)
+    batteries_by_drone = _get_latest_battery_by_drone(session=session, system_id=system_id)
+    drones = _merge_drone_batteries(drone_paths["drones"], batteries_by_drone)
 
     return {
         "ok": True,
@@ -355,6 +417,6 @@ def get_map_overview(
         "stream_key": drone_paths["stream_key"],
         "drone_path_source": drone_paths.get("source"),
         "sampled_message_count": drone_paths.get("sampled_message_count", 0),
-        "drone_paths": drone_paths["drones"],
+        "drone_paths": drones,
         "fire_detections": fire_detections,
     }
