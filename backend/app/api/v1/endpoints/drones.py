@@ -15,6 +15,7 @@ from app.models import DroneTelemetry
 
 
 router = APIRouter(tags=["drones"])
+router2 = APIRouter(tags=["SSE"])
 
 DRONE_LAST_SEEN_KEY = os.getenv("DRONE_LAST_SEEN_KEY", "drone:last_seen")
 DRONE_STATUS_KEY_PREFIX = os.getenv("DRONE_STATUS_KEY_PREFIX", "drone:status")
@@ -311,7 +312,7 @@ def _latest_position_rows() -> list[dict]:
     return items
 
 
-@router.get("/drones/battery/stream")
+@router2.get("/drones/battery/stream")
 async def stream_drone_battery(
     request: Request,
     interval_sec: float = Query(2.0, ge=0.5, le=60),
@@ -333,7 +334,7 @@ async def stream_drone_battery(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@router.get("/drones/position/stream")
+@router2.get("/drones/position/stream")
 async def stream_drone_position(
     request: Request,
     interval_sec: float = Query(2.0, ge=0.5, le=60),
