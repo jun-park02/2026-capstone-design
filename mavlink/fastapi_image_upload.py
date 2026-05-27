@@ -5,7 +5,6 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-
 import redis
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -17,8 +16,10 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 # 업로드 완료 이벤트를 발행할 Redis Stream 키
 STREAM_KEY = os.getenv("STREAM_KEY", "fire_detect")
-# 업로드된 이미지를 저장할 컨테이너 내부 경로
+# 업로드된 RGB 이미지를 저장할 컨테이너 내부 경로
 IMAGE_SAVE_DIR = os.getenv("IMG_SAVE_DIR", "/app/images")
+# 업로드된 IR 이미지를 저장할 컨테이너 내부 경로
+IR_IMAGE_SAVE_DIR = os.getenv("IR_IMG_SAVE_DIR", "/app/images/irs")
 # FastAPI 업로드 서버가 바인딩할 주소
 HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
 # FastAPI 업로드 서버가 바인딩할 포트
@@ -55,6 +56,7 @@ async def lifespan(app: FastAPI):
         print(f"[FIRE-DETECT-UPLOAD] Redis connection failed: {exc}")
 
     Path(IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+    Path(IR_IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
     print(f"[FIRE-DETECT-UPLOAD] HTTP upload server: {HTTP_HOST}:{HTTP_PORT}")
     print(f"[FIRE-DETECT-UPLOAD] Redis Stream: {STREAM_KEY}")
     print(f"[FIRE-DETECT-UPLOAD] Image save dir: {IMAGE_SAVE_DIR}")
@@ -138,13 +140,16 @@ def normalize_captured_at(value: Any) -> Any:
 
 async def save_upload_file(upload: UploadFile, image_path: Path) -> int:
     size = 0
+    # 업로드된 이미지를 지정된 경로에 바이너리 파일로 저장한다.
     with image_path.open("wb") as output:
         while True:
+            # 메모리 사용을 줄이기 위해 1MB 단위로 나누어 읽는다.
             chunk = await upload.read(1024 * 1024)
             if not chunk:
                 break
             size += len(chunk)
             if size > MAX_UPLOAD_BYTES:
+                # 허용 크기를 초과하면 저장 중인 파일을 닫고 삭제한다.
                 output.close()
                 image_path.unlink(missing_ok=True)
                 raise HTTPException(status_code=413, detail="uploaded image is too large")
@@ -218,18 +223,32 @@ async def upload_fire_detection(
     print(rgb_image)
 
     metadata_obj = parse_metadata(metadata)
-    gps = metadata_obj.get("gps")
+    gps = metadata_obj.get("gps") if metadata_obj.get("gps") is not None else None
     detection = metadata_obj.get("detection")
     if rgb_image is None:
         raise HTTPException(status_code=400, detail="RGB_image file is required")
 
     captured_at = first_value(captured_at, normalize_captured_at(metadata_obj.get("timestamp")))
 
-    lat = gps.get("Latitude") if type(gps) is not str else 0
-    lon = gps.get("Longitude") if type(gps) is not str else 0
+    lat = gps.get("Latitude") if gps is not None else 0
+    lon = gps.get("Longitude") if gps is not None else 0
     alt = first_value(alt, metadata_value(gps, "Altitude", "altitude", "alt"))
     
-    confidence = first_value(confidence, metadata_value(detection, "confidence", "Confidence", "score", "Score"))
+    confidene = None
+
+    # print(detection)
+    # {'objects': [{'class': 'Smoke', 'conf': 0.5803520083427429, 'bbox': [241, 0, 157, 45]}, {'class': 'Fire', 'conf': 0.3345894515514374, 'bbox': [284, 35, 70, 23]}]}
+    # print("objects:", detection.get("objects"))
+    # print("objects[0]:", detection.get("objects")[0])
+    # print("objects[1]:", detection.get("objects")[1])
+    try:
+        confidence = max(float(detection.get("objects")[0].get("conf")), float(detection.get("objects")[1].get("conf")))
+    except Exception as e:
+        confidence = detection.get("objects")[0].get("conf")
+
+        
+    print("Confidence:", confidence)
+    # confidence = first_value(confidence, metadata_value(detection, "conf", "Confidence", "score", "Score"))
 
     # 요청으로 받은 이미지 형식을 허용된 확장자로 정규화한다.
     image_ext = normalize_image_format(image_format, rgb_image.filename, rgb_image.content_type)
@@ -241,11 +260,31 @@ async def upload_fire_detection(
     # 컨테이너 내부 이미지 저장 경로를 만든다.
     image_path = Path(IMAGE_SAVE_DIR) / image_name
 
+    # --------------------------------------------------------
+
+    if ir_image is None:
+        raise HTTPException(status_code=400, detail="uploaded image is empty")
+
+
+    ir_image_ext = normalize_image_format(image_format, ir_image.filename, ir_image.content_type)
+    ir_image_name = f"{normalized_event_id}_{normalized_image_id}_ir.{ir_image_ext}"
+    ir_image_path = Path(IR_IMAGE_SAVE_DIR) / ir_image_name
+    
     # 업로드된 이미지를 로컬 공유 볼륨에 저장한다.
     image_size_bytes = await save_upload_file(rgb_image, image_path)
+    ir_image_size_bytes = await save_upload_file(ir_image, ir_image_path)
+
     if image_size_bytes <= 0:
+        # unlink는 pathlib.Path 객체에서 파일을 삭제하는 메서드
+        # missing_ok=True는 파일이 이미 없어도 에러를 내지 말라는 의미
         image_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="uploaded image is empty")
+    
+    if ir_image_size_bytes <= 0:
+        ir_image_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="uploaded image is empty")
+
+    # --------------------------------------------------------
 
     # 요청을 보낸 클라이언트 IP를 payload에 남긴다.
     client_host = request.client.host if request.client else None

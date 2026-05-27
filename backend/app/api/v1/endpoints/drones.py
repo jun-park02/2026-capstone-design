@@ -265,15 +265,21 @@ def _latest_battery_rows(limit: int = 200) -> list[dict]:
             payload = row.raw_payload if isinstance(row.raw_payload, dict) else {}
             data = _parse_json(payload.get("data"))
             data = data if isinstance(data, dict) else {}
+            battery_remaining = data.get("battery_remaining")
+            voltage_battery = data.get("voltage_battery")
+            current_battery = data.get("current_battery")
+            if battery_remaining is None and voltage_battery is None and current_battery is None:
+                continue
+
             latest_by_drone[drone_id] = {
                 "drone_id": drone_id,
                 "system_id": row.system_id,
                 "component_id": row.component_id,
                 "message_type": row.message_type,
                 "telemetry_at": _serialize_datetime(row.telemetry_at),
-                "battery_remaining": data.get("battery_remaining"),
-                "voltage_battery": data.get("voltage_battery"),
-                "current_battery": data.get("current_battery"),
+                "battery_remaining": battery_remaining,
+                "voltage_battery": voltage_battery,
+                "current_battery": current_battery,
                 "raw_payload": row.raw_payload,
             }
         return sorted(latest_by_drone.values(), key=lambda item: item["drone_id"])

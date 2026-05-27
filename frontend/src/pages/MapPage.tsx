@@ -3,9 +3,12 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline, ZoomControl, useMap }
 import { Card, CardContent } from '../components/ui/Card';
 import { Navigation, Flame, Battery } from 'lucide-react';
 import L from 'leaflet';
-import { USE_MOCK_DATA, apiClient } from '../api/config';
+import { API_BASE_URL, USE_MOCK_DATA, apiClient } from '../api/config';
 
 const DRONE_FOCUS_ZOOM = 16;
+const OVERVIEW_REFRESH_MS = 30000;
+const SSE_REFRESH_SEC = 2;
+const MAX_LIVE_PATH_POINTS = 500;
 
 const fireIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
@@ -74,6 +77,27 @@ interface MapOverviewResponse {
   fire_detections?: BackendFireDetection[];
 }
 
+interface DronePositionStreamItem {
+  drone_id?: string | number | null;
+  system_id?: string | number | null;
+  lat?: number | string | null;
+  lon?: number | string | null;
+  alt?: number | string | null;
+  heading?: number | string | null;
+  position?: unknown;
+}
+
+interface DroneBatteryStreamItem {
+  drone_id?: string | number | null;
+  system_id?: string | number | null;
+  battery_remaining?: number | string | null;
+}
+
+interface StreamResponse<T> {
+  ok?: boolean;
+  items?: T[];
+}
+
 const mockDrones: Drone[] = [
   { id: 'DRN-01', lat: 37.5665, lng: 126.9780, alt: 120, heading: 35, battery: 85, status: '정상' },
   { id: 'DRN-02', lat: 37.5700, lng: 126.9820, alt: 110, heading: 125, battery: 42, status: '경고' },
@@ -109,6 +133,8 @@ const mockDronePaths: DronePaths = {
 const DRONE_PATH_COLORS = ['#2563eb', '#0f766e', '#f97316', '#7c3aed', '#db2777'];
 
 const getDronePathColor = (index: number) => DRONE_PATH_COLORS[index % DRONE_PATH_COLORS.length];
+
+const apiUrl = (path: string) => `${API_BASE_URL.replace(/\/$/, '')}${path}`;
 
 const normalizeHeading = (heading: number | null) => {
   if (heading === null) {
@@ -185,6 +211,28 @@ const buildDronePath = (dronePath: BackendDronePath): Coordinate[] => {
   return (dronePath.path ?? [])
     .map(coordinateFromPoint)
     .filter((point): point is Coordinate => point !== null);
+};
+
+const droneIdFromStreamItem = (item: DronePositionStreamItem | DroneBatteryStreamItem) => {
+  const id = item.drone_id ?? item.system_id;
+  return id === null || id === undefined || id === '' ? null : String(id);
+};
+
+const coordinateFromStreamItem = (item: DronePositionStreamItem): Coordinate | null => (
+  toCoordinate(item.position) ?? (() => {
+    const lat = toNumber(item.lat);
+    const lng = toNumber(item.lon);
+    return lat === null || lng === null ? null : [lat, lng];
+  })()
+);
+
+const appendPathPoint = (path: Coordinate[] | undefined, point: Coordinate) => {
+  const nextPath = path ? [...path] : [];
+  const lastPoint = nextPath[nextPath.length - 1];
+  if (!lastPoint || lastPoint[0] !== point[0] || lastPoint[1] !== point[1]) {
+    nextPath.push(point);
+  }
+  return nextPath.slice(-MAX_LIVE_PATH_POINTS);
 };
 
 const formatTime = (value?: string | null) => {
@@ -306,23 +354,128 @@ export const MapPage: React.FC = () => {
       return;
     }
 
-    const fetchMapData = async () => {
+    let isMounted = true;
+
+    const syncMapOverview = async () => {
       try {
         const res = await apiClient.get<MapOverviewResponse>('/map/overview');
         const nextData = transformOverview(res.data);
+        if (!isMounted) {
+          return;
+        }
         setDrones(nextData.drones);
         setDronePaths(nextData.dronePaths);
         setFires(nextData.fires);
         setLoadError(null);
       } catch (error) {
         console.error('Failed to fetch map overview:', error);
-        setLoadError('지도 데이터를 불러오지 못했습니다.');
+        if (isMounted) {
+          setLoadError('지도 데이터를 불러오지 못했습니다.');
+        }
       }
     };
 
-    fetchMapData();
-    const interval = setInterval(fetchMapData, 5000);
-    return () => clearInterval(interval);
+    const positionSource = new EventSource(apiUrl(`/drones/position/stream?interval_sec=${SSE_REFRESH_SEC}`));
+    const batterySource = new EventSource(apiUrl(`/drones/battery/stream?interval_sec=${SSE_REFRESH_SEC}`));
+
+    positionSource.addEventListener('position', (event) => {
+      try {
+        const payload = JSON.parse(event.data) as StreamResponse<DronePositionStreamItem>;
+        const items = payload.items ?? [];
+
+        setDrones((currentDrones) => {
+          const dronesById = new Map(currentDrones.map((drone) => [drone.id, drone]));
+
+          for (const item of items) {
+            const id = droneIdFromStreamItem(item);
+            const coordinate = coordinateFromStreamItem(item);
+            if (!id || !coordinate) {
+              continue;
+            }
+
+            const existingDrone = dronesById.get(id);
+            dronesById.set(id, {
+              id,
+              lat: coordinate[0],
+              lng: coordinate[1],
+              alt: toNumber(item.alt) ?? existingDrone?.alt ?? null,
+              heading: toNumber(item.heading) ?? existingDrone?.heading ?? null,
+              battery: existingDrone?.battery ?? null,
+              status: existingDrone?.status ?? '정상',
+            });
+          }
+
+          return Array.from(dronesById.values());
+        });
+
+        setDronePaths((currentPaths) => {
+          const nextPaths = { ...currentPaths };
+
+          for (const item of items) {
+            const id = droneIdFromStreamItem(item);
+            const coordinate = coordinateFromStreamItem(item);
+            if (!id || !coordinate) {
+              continue;
+            }
+
+            nextPaths[id] = appendPathPoint(nextPaths[id], coordinate);
+          }
+
+          return nextPaths;
+        });
+      } catch (error) {
+        console.error('Failed to parse drone position SSE:', error);
+      }
+    });
+
+    batterySource.addEventListener('battery', (event) => {
+      try {
+        const payload = JSON.parse(event.data) as StreamResponse<DroneBatteryStreamItem>;
+        const items = payload.items ?? [];
+
+        setDrones((currentDrones) => {
+          const batteriesById = new Map<string, number | null>();
+          for (const item of items) {
+            const id = droneIdFromStreamItem(item);
+            if (!id) {
+              continue;
+            }
+            batteriesById.set(id, toNumber(item.battery_remaining));
+          }
+
+          if (batteriesById.size === 0) {
+            return currentDrones;
+          }
+
+          return currentDrones.map((drone) => (
+            batteriesById.has(drone.id)
+              ? { ...drone, battery: batteriesById.get(drone.id) ?? null }
+              : drone
+          ));
+        });
+      } catch (error) {
+        console.error('Failed to parse drone battery SSE:', error);
+      }
+    });
+
+    const handleStreamError = () => {
+      if (isMounted) {
+        setLoadError('실시간 드론 데이터를 연결하지 못했습니다.');
+      }
+    };
+
+    positionSource.onerror = handleStreamError;
+    batterySource.onerror = handleStreamError;
+
+    syncMapOverview();
+    const interval = setInterval(syncMapOverview, OVERVIEW_REFRESH_MS);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      positionSource.close();
+      batterySource.close();
+    };
   }, []);
 
   const mapFitPoints = useMemo(() => {
