@@ -65,43 +65,67 @@ services:
     depends_on:
       - redis
   
-  # drone-tx-test-1:
-  #   build:
-  #     context: ./mavlink
-  #   container_name: drone-tx-test-1
-  #   environment:
-  #     - PYTHONDONTWRITEBYTECODE=1
-  #     - PYTHONUNBUFFERED=1
-  #     - TARGET_IP=drone-telemetry-udp-rx  # Docker 네트워크에서 서비스 이름으로 접근
-  #     - TARGET_PORT=14550
-  #     - CONTAINER_NAME=drone-tx-test-1
-  #     - DRONE_ID=1
-  #     - POSITION_OFFSET=0
-  #     - ALT_OFFSET=0
-  #     - MOVEMENT_MODE=linear
-  #     - VEHICLE_STATUS=MC_FLYING
-  #   command: python drone_tx_test_sender.py
-  #   networks:
-  #     - app-network
-  #   depends_on:
-  #     - drone-telemetry-udp-rx
+  drone-tx-test-1:
+    build:
+      context: ./mavlink
+    container_name: drone-tx-test-1
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - TARGET_IP=drone-telemetry-udp-rx  # Docker 네트워크에서 서비스 이름으로 접근
+      - TARGET_PORT=14550
+      - CONTAINER_NAME=drone-tx-test-1
+      - DRONE_ID=1
+      - POSITION_OFFSET=0
+      - ALT_OFFSET=0
+      - MOVEMENT_MODE=rectangle
+      - RECTANGLE_WIDTH_METERS=600
+      - RECTANGLE_HEIGHT_METERS=300
+      - RECTANGLE_PERIOD_STEPS=240
+      - VEHICLE_STATUS=MC_FLYING
+    command: python drone_tx_test_sender.py
+    networks:
+      - app-network
+    depends_on:
+      - drone-telemetry-udp-rx
 
-  # drone-tx-test-2:
+  drone-tx-test-2:
+    build:
+      context: ./mavlink
+    container_name: drone-tx-test-2
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - TARGET_IP=drone-telemetry-udp-rx
+      - TARGET_PORT=14550
+      - CONTAINER_NAME=drone-tx-test-2
+      - DRONE_ID=2
+      - POSITION_OFFSET=0.006
+      - ALT_OFFSET=10
+      - MOVEMENT_MODE=circle
+      - CIRCLE_RADIUS_METERS=300
+      - CIRCLE_PERIOD_STEPS=180
+      - VEHICLE_STATUS=MC_FLYING
+    command: python drone_tx_test_sender.py
+    networks:
+      - app-network
+    depends_on:
+      - drone-telemetry-udp-rx
+
+  # drone-tx-test-3:
   #   build:
   #     context: ./mavlink
-  #   container_name: drone-tx-test-2
+  #   container_name: drone-tx-test-3
   #   environment:
   #     - PYTHONDONTWRITEBYTECODE=1
   #     - PYTHONUNBUFFERED=1
   #     - TARGET_IP=drone-telemetry-udp-rx
   #     - TARGET_PORT=14550
-  #     - CONTAINER_NAME=drone-tx-test-2
-  #     - DRONE_ID=2
-  #     - POSITION_OFFSET=0.006
-  #     - ALT_OFFSET=10
-  #     - MOVEMENT_MODE=circle
-  #     - CIRCLE_RADIUS_METERS=300
-  #     - CIRCLE_PERIOD_STEPS=180
+  #     - CONTAINER_NAME=drone-tx-test-3
+  #     - DRONE_ID=3
+  #     - POSITION_OFFSET=0.012
+  #     - ALT_OFFSET=20
+  #     - MOVEMENT_MODE=linear
   #     - VEHICLE_STATUS=MC_FLYING
   #   command: python drone_tx_test_sender.py
   #   networks:

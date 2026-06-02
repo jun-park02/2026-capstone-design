@@ -25,6 +25,10 @@ CIRCLE_RADIUS_METERS = float(os.getenv("CIRCLE_RADIUS_METERS", "250"))
 CIRCLE_PERIOD_STEPS = max(1, int(os.getenv("CIRCLE_PERIOD_STEPS", "120")))
 # circle 모드에서 원형 이동을 시작할 각도
 CIRCLE_START_DEGREES = float(os.getenv("CIRCLE_START_DEGREES", "0"))
+# rectangle mode route size and loop duration
+RECTANGLE_WIDTH_METERS = max(1.0, float(os.getenv("RECTANGLE_WIDTH_METERS", "500")))
+RECTANGLE_HEIGHT_METERS = max(1.0, float(os.getenv("RECTANGLE_HEIGHT_METERS", "300")))
+RECTANGLE_PERIOD_STEPS = max(4, int(os.getenv("RECTANGLE_PERIOD_STEPS", "160")))
 
 # UDP JSON을 받을 수신 서버 주소
 TARGET_IP = os.getenv("TARGET_IP", "udp-rx")
@@ -60,7 +64,19 @@ def meters_to_lon_degrees(meters: float, latitude: float) -> float:
     return meters / scale
 
 
-def get_position(seq: int) -> tuple[float, float, float]:
+def offset_position(
+    center_lat: float,
+    center_lon: float,
+    *,
+    north_meters: float,
+    east_meters: float,
+) -> tuple[float, float]:
+    lat = center_lat + (north_meters / METERS_PER_DEGREE_LAT)
+    lon = center_lon + meters_to_lon_degrees(east_meters, center_lat)
+    return lat, lon
+
+
+def get_position(seq: int) -> tuple[float, float, float, float]:
     center_lat = BASE_LAT + POSITION_OFFSET
     center_lon = BASE_LON + POSITION_OFFSET
 
@@ -71,23 +87,58 @@ def get_position(seq: int) -> tuple[float, float, float]:
         lat = center_lat + (math.cos(angle) * CIRCLE_RADIUS_METERS / METERS_PER_DEGREE_LAT)
         lon = center_lon + (math.sin(angle) * meters_to_lon_degrees(CIRCLE_RADIUS_METERS, center_lat))
         alt = BASE_ALT + ALT_OFFSET
-        return lat, lon, alt
+        heading = (math.degrees(angle) + 90) % 360
+        return lat, lon, alt, heading
+
+    if MOVEMENT_MODE == "rectangle":
+        width = RECTANGLE_WIDTH_METERS
+        height = RECTANGLE_HEIGHT_METERS
+        half_width = width / 2
+        half_height = height / 2
+        perimeter = (width + height) * 2
+        distance = (seq % RECTANGLE_PERIOD_STEPS) / RECTANGLE_PERIOD_STEPS * perimeter
+
+        if distance < width:
+            east_meters = -half_width + distance
+            north_meters = half_height
+            heading = 90
+        elif distance < width + height:
+            east_meters = half_width
+            north_meters = half_height - (distance - width)
+            heading = 180
+        elif distance < (2 * width) + height:
+            east_meters = half_width - (distance - width - height)
+            north_meters = -half_height
+            heading = 270
+        else:
+            east_meters = -half_width
+            north_meters = -half_height + (distance - (2 * width) - height)
+            heading = 0
+
+        lat, lon = offset_position(
+            center_lat,
+            center_lon,
+            north_meters=north_meters,
+            east_meters=east_meters,
+        )
+        alt = BASE_ALT + ALT_OFFSET
+        return lat, lon, alt, heading
 
     lat = center_lat + (seq * LINEAR_STEP)
     lon = center_lon + (seq * LINEAR_STEP)
     alt = BASE_ALT + ALT_OFFSET + (seq * ALT_STEP)
-    return lat, lon, alt
+    return lat, lon, alt, BASE_HEADING
 
 
 def build_payload(seq: int, started_at: float) -> dict:
-    lat, lon, alt = get_position(seq)
+    lat, lon, alt, heading = get_position(seq)
     return {
         "drone_id": DRONE_ID,
         "simtime": round(time.monotonic() - started_at, 3),
         "lla": [round(lat, 8), round(lon, 8), round(alt, 2)],
         "relative_altitude": round(alt - BASE_ALT, 2),
         "va": BASE_VA,
-        "heading": BASE_HEADING,
+        "heading": round(heading, 2),
         "battery": {
             "soc": BATTERY_SOC,
             "voltage": BATTERY_VOLTAGE,
@@ -122,6 +173,7 @@ def main():
         print(
             f"[{CONTAINER_NAME}] seq={seq}, target={TARGET_IP}:{TARGET_PORT}, "
             f"lat={lat:.6f}, lon={lon:.6f}, alt={alt:.1f}m, "
+            f"heading={payload['heading']:.1f}, "
             f"status={payload['vehicle_status']}"
         )
         # 다음 패킷에서 위치가 변하도록 순번 증가
