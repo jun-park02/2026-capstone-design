@@ -311,6 +311,10 @@ async def upload_fire_detection(
     # 이미지 저장 완료 이벤트를 Redis Stream에 발행한다.
     msg_id = publish_completed_event(payload)
 
+    # TCP 코드 여기에!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    
+
+
     # 업로드 요청을 보낸 클라이언트에게 처리 결과를 반환한다.
     return {
         "ok": True,
