@@ -9,6 +9,7 @@ from urllib import error, request
 
 # 업로드 테스트에 사용할 로컬 이미지 파일 경로
 IMAGE_PATH = Path(os.getenv("IMAGE_PATH", r"C:\test\images.jpeg"))
+IR_IMAGE_PATH = Path(os.getenv("IR_IMAGE_PATH", str(IMAGE_PATH)))
 # 이미지를 보낼 FastAPI 업로드 엔드포인트 URL
 TARGET_URL = os.getenv("TARGET_URL", "http://127.0.0.1:14551/fire-detections/upload")
 
@@ -44,10 +45,7 @@ def detect_image_format(image_path: Path) -> str:
 def build_multipart_body(
     fields: dict[str, str],
     *,
-    file_field: str,
-    file_path: Path,
-    file_bytes: bytes,
-    content_type: str,
+    files: list[tuple[str, Path, bytes, str]],
 ) -> tuple[bytes, str]:
     boundary = f"----fire-detect-{uuid.uuid4().hex}"
     lines: list[bytes] = []
@@ -62,16 +60,22 @@ def build_multipart_body(
             ]
         )
 
+    for file_field, file_path, file_bytes, content_type in files:
+        lines.extend(
+            [
+                f"--{boundary}".encode("utf-8"),
+                (
+                    f'Content-Disposition: form-data; name="{file_field}"; '
+                    f'filename="{file_path.name}"'
+                ).encode("utf-8"),
+                f"Content-Type: {content_type}".encode("utf-8"),
+                b"",
+                file_bytes,
+            ]
+        )
+
     lines.extend(
         [
-            f"--{boundary}".encode("utf-8"),
-            (
-                f'Content-Disposition: form-data; name="{file_field}"; '
-                f'filename="{file_path.name}"'
-            ).encode("utf-8"),
-            f"Content-Type: {content_type}".encode("utf-8"),
-            b"",
-            file_bytes,
             f"--{boundary}--".encode("utf-8"),
             b"",
         ]
@@ -90,12 +94,44 @@ def main():
     if not image_bytes:
         raise ValueError("빈 파일은 전송할 수 없습니다.")
 
+    ir_image_path = IR_IMAGE_PATH
+    if not ir_image_path.exists():
+        raise FileNotFoundError(f"IR image file not found: {ir_image_path}")
+    if not ir_image_path.is_file():
+        raise ValueError(f"IR image path is not a file: {ir_image_path}")
+
+    ir_image_bytes = ir_image_path.read_bytes()
+    if not ir_image_bytes:
+        raise ValueError("IR image file is empty.")
+
     image_format = detect_image_format(image_path)
     content_type = mimetypes.guess_type(image_path.name)[0] or f"image/{image_format}"
     if content_type == "image/jpeg":
         image_format = "jpg"
 
+    ir_image_format = detect_image_format(ir_image_path)
+    ir_content_type = mimetypes.guess_type(ir_image_path.name)[0] or f"image/{ir_image_format}"
+
+    metadata = {
+        "timestamp": time.time(),
+        "gps": {
+            "Latitude": LAT,
+            "Longitude": LON,
+            "Altitude": ALT,
+        },
+        "detection": {
+            "objects": [
+                {
+                    "class": "Fire",
+                    "conf": CONFIDENCE,
+                    "bbox": [0, 0, 0, 0],
+                }
+            ]
+        },
+    }
+
     fields = {
+        "metadata": json.dumps(metadata),
         "event_id": EVENT_ID,
         "image_id": IMAGE_ID,
         "captured_at": CAPTURED_AT,
@@ -108,14 +144,15 @@ def main():
     }
     body, boundary = build_multipart_body(
         fields,
-        file_field="image",
-        file_path=image_path,
-        file_bytes=image_bytes,
-        content_type=content_type,
+        files=[
+            ("RGB_image", image_path, image_bytes, content_type),
+            ("IR_image", ir_image_path, ir_image_bytes, ir_content_type),
+        ],
     )
 
     print(
         f"[FIRE-TX] upload image={image_path} size={len(image_bytes)} "
+        f"ir_image={ir_image_path} ir_size={len(ir_image_bytes)} "
         f"url={TARGET_URL}"
     )
     print(

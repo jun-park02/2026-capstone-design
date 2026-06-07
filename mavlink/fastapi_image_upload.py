@@ -8,6 +8,8 @@ from typing import Any
 import redis
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+import socket
+import struct
 
 
 # Redis 서버 주소
@@ -20,6 +22,8 @@ STREAM_KEY = os.getenv("STREAM_KEY", "fire_detect")
 IMAGE_SAVE_DIR = os.getenv("IMG_SAVE_DIR", "/app/images")
 # 업로드된 IR 이미지를 저장할 컨테이너 내부 경로
 IR_IMAGE_SAVE_DIR = os.getenv("IR_IMG_SAVE_DIR", "/app/images/irs")
+# Uploaded heatmap image save directory
+HEATMAP_IMAGE_SAVE_DIR = os.getenv("HEATMAP_IMG_SAVE_DIR", "/app/images/heatmaps")
 # FastAPI 업로드 서버가 바인딩할 주소
 HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
 # FastAPI 업로드 서버가 바인딩할 포트
@@ -57,6 +61,7 @@ async def lifespan(app: FastAPI):
 
     Path(IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
     Path(IR_IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+    Path(HEATMAP_IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
     print(f"[FIRE-DETECT-UPLOAD] HTTP upload server: {HTTP_HOST}:{HTTP_PORT}")
     print(f"[FIRE-DETECT-UPLOAD] Redis Stream: {STREAM_KEY}")
     print(f"[FIRE-DETECT-UPLOAD] Image save dir: {IMAGE_SAVE_DIR}")
@@ -203,6 +208,97 @@ def health():
         "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
 
+@app.post("/heatmap/upload")
+async def upload_heatmap_image(
+    request: Request,
+    image_0: UploadFile | None = File(None, alias="image_0"),
+    image_1: UploadFile | None = File(None, alias="image_1"),
+    image_2: UploadFile | None = File(None, alias="image_2"),
+    image_3: UploadFile | None = File(None, alias="image_3"),
+    image_4: UploadFile | None = File(None, alias="image_4"),
+    image_5: UploadFile | None = File(None, alias="image_5"),
+    meta_json: str | None = Form(None, examples=[""]),
+):
+    try:
+        data = json.loads(meta_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="meta_json must be valid JSON") from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="meta_json must be a JSON object")
+
+    x_min = data.get("x_min")
+    x_max = data.get("x_max")
+    y_min = data.get("y_min")
+    y_max = data.get("y_max")
+    lat = data.get("lat")
+    lon = data.get("lon")
+    radius_km = data.get("radius_km")
+    num_times = data.get("num_times")
+
+    print(data)
+
+    heatmap_id = safe_id(str(data.get("heatmap_id") or f"heatmap-{int(time.time() * 1000)}"))
+    Path(HEATMAP_IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+
+    heatmap_images = [
+        ("image_0", image_0),
+        ("image_1", image_1),
+        ("image_2", image_2),
+        ("image_3", image_3),
+        ("image_4", image_4),
+        ("image_5", image_5),
+    ]
+    uploaded_images = [(field_name, upload) for field_name, upload in heatmap_images if upload is not None]
+    if not uploaded_images:
+        raise HTTPException(status_code=400, detail="at least one heatmap image is required")
+
+    saved_images = []
+    for frame_index, (field_name, upload) in enumerate(uploaded_images):
+        image_ext = normalize_image_format(None, upload.filename, upload.content_type)
+        image_name = f"{heatmap_id}_frame_{frame_index:03d}.{image_ext}"
+        image_path = Path(HEATMAP_IMAGE_SAVE_DIR) / image_name
+
+        image_size_bytes = await save_upload_file(upload, image_path)
+        if image_size_bytes <= 0:
+            image_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"{field_name} is empty")
+
+        saved_images.append(
+            {
+                "field_name": field_name,
+                "frame_index": frame_index,
+                "image_name": image_name,
+                "image_path": str(image_path),
+                "image_size_bytes": image_size_bytes,
+                "original_filename": upload.filename,
+                "content_type": upload.content_type,
+            }
+        )
+
+    client_host = request.client.host if request.client else None
+    print(
+        "[HEATMAP-UPLOAD] images saved: "
+        f"heatmap_id={heatmap_id} count={len(saved_images)}"
+    )
+
+    return {
+        "ok": True,
+        "heatmap_id": heatmap_id,
+        "image_count": len(saved_images),
+        "images": saved_images,
+        "src_ip": client_host,
+        "metadata": {
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "lat": lat,
+            "lon": lon,
+            "radius_km": radius_km,
+            "num_times": num_times,
+        },
+    }
 
 @app.post("/fire-detections/upload")
 async def upload_fire_detection(
@@ -312,8 +408,35 @@ async def upload_fire_detection(
     msg_id = publish_completed_event(payload)
 
     # TCP 코드 여기에!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    
+    max_retries = 3
 
+    for attempt in range(1, max_retries + 1):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+                client_socket.settimeout(5)
+                client_socket.connect(("192.168.1.127", 50000))
+
+                # lat = 36.693575
+                # lon = 126.580372 
+
+                # client_socket.connect(("192.168.1.127", 50000))
+                # client_socket.sendall(data)
+
+                message = {
+                    "latitude": 40.693575,
+                    "longitude": 130.580372 
+                }
+
+                # JSON 문자열 + 개행 문자
+                data = json.dumps(message) + "\n"
+                data = data.encode("utf-8")
+                client_socket.sendall(data)
+            break
+        except Exception as e:
+            print(e)
+
+            if attempt == max_retries:
+                print("failed")
 
     # 업로드 요청을 보낸 클라이언트에게 처리 결과를 반환한다.
     return {

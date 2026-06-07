@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, ZoomControl, useMap } from 'react-leaflet';
+import { ImageOverlay, MapContainer, TileLayer, Marker, Popup, Polyline, ZoomControl, useMap } from 'react-leaflet';
 import { Card, CardContent } from '../components/ui/Card';
 import { Navigation, Flame, Battery } from 'lucide-react';
 import L from 'leaflet';
@@ -9,6 +9,7 @@ const DRONE_FOCUS_ZOOM = 16;
 const OVERVIEW_REFRESH_MS = 30000;
 const SSE_REFRESH_SEC = 2;
 const MAX_LIVE_PATH_POINTS = 500;
+const DEFAULT_HEATMAP_OPACITY = 0.35;
 
 const fireIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
@@ -91,6 +92,27 @@ interface DroneBatteryStreamItem {
   drone_id?: string | number | null;
   system_id?: string | number | null;
   battery_remaining?: number | string | null;
+}
+
+interface HeatmapCorner {
+  lat?: number | string | null;
+  lon?: number | string | null;
+  lng?: number | string | null;
+}
+
+interface HeatmapOverlayPayload {
+  ok?: boolean;
+  image_url?: string | null;
+  imageUrl?: string | null;
+  top_left?: HeatmapCorner | null;
+  bottom_right?: HeatmapCorner | null;
+  opacity?: number | string | null;
+}
+
+interface HeatmapOverlayState {
+  imageUrl: string;
+  bounds: [Coordinate, Coordinate];
+  opacity: number;
 }
 
 interface StreamResponse<T> {
@@ -226,6 +248,57 @@ const coordinateFromStreamItem = (item: DronePositionStreamItem): Coordinate | n
   })()
 );
 
+const coordinateFromHeatmapCorner = (corner?: HeatmapCorner | null): Coordinate | null => {
+  if (!corner) {
+    return null;
+  }
+
+  const lat = toNumber(corner.lat);
+  const lng = toNumber(corner.lon ?? corner.lng);
+  return lat === null || lng === null ? null : [lat, lng];
+};
+
+const clampOpacity = (value: unknown) => {
+  const opacity = toNumber(value);
+  if (opacity === null) {
+    return DEFAULT_HEATMAP_OPACITY;
+  }
+
+  return Math.min(1, Math.max(0, opacity));
+};
+
+const resolveHeatmapImageUrl = (imageUrl: string) => {
+  if (/^https?:\/\//i.test(imageUrl) || imageUrl.startsWith('data:')) {
+    return imageUrl;
+  }
+
+  return apiUrl(imageUrl.startsWith('/') ? imageUrl : `/${imageUrl}`);
+};
+
+const normalizeHeatmapOverlay = (payload: HeatmapOverlayPayload): HeatmapOverlayState | null => {
+  if (payload.ok === false) {
+    return null;
+  }
+
+  const imageUrl = payload.image_url ?? payload.imageUrl;
+  const topLeft = coordinateFromHeatmapCorner(payload.top_left);
+  const bottomRight = coordinateFromHeatmapCorner(payload.bottom_right);
+  if (!imageUrl || !topLeft || !bottomRight) {
+    return null;
+  }
+
+  const north = Math.max(topLeft[0], bottomRight[0]);
+  const south = Math.min(topLeft[0], bottomRight[0]);
+  const east = Math.max(topLeft[1], bottomRight[1]);
+  const west = Math.min(topLeft[1], bottomRight[1]);
+
+  return {
+    imageUrl: resolveHeatmapImageUrl(imageUrl),
+    bounds: [[south, west], [north, east]],
+    opacity: clampOpacity(payload.opacity),
+  };
+};
+
 const appendPathPoint = (path: Coordinate[] | undefined, point: Coordinate) => {
   const nextPath = path ? [...path] : [];
   const lastPoint = nextPath[nextPath.length - 1];
@@ -347,6 +420,7 @@ export const MapPage: React.FC = () => {
   const [drones, setDrones] = useState<Drone[]>(USE_MOCK_DATA ? mockDrones : []);
   const [dronePaths, setDronePaths] = useState<DronePaths>(USE_MOCK_DATA ? mockDronePaths : {});
   const [fires, setFires] = useState<FireMarker[]>(USE_MOCK_DATA ? mockFires : []);
+  const [heatmapOverlay, setHeatmapOverlay] = useState<HeatmapOverlayState | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -377,6 +451,7 @@ export const MapPage: React.FC = () => {
 
     const positionSource = new EventSource(apiUrl(`/drones/position/stream?interval_sec=${SSE_REFRESH_SEC}`));
     const batterySource = new EventSource(apiUrl(`/drones/battery/stream?interval_sec=${SSE_REFRESH_SEC}`));
+    const heatmapSource = new EventSource(apiUrl('/heatmaps/stream'));
 
     positionSource.addEventListener('position', (event) => {
       try {
@@ -458,6 +533,21 @@ export const MapPage: React.FC = () => {
       }
     });
 
+    const handleHeatmapEvent = (event: MessageEvent) => {
+      try {
+        const payload = JSON.parse(event.data) as HeatmapOverlayPayload;
+        const nextOverlay = normalizeHeatmapOverlay(payload);
+        if (nextOverlay && isMounted) {
+          setHeatmapOverlay(nextOverlay);
+        }
+      } catch (error) {
+        console.error('Failed to parse heatmap SSE:', error);
+      }
+    };
+
+    heatmapSource.addEventListener('heatmap', handleHeatmapEvent);
+    heatmapSource.onmessage = handleHeatmapEvent;
+
     const handleStreamError = () => {
       if (isMounted) {
         setLoadError('실시간 드론 데이터를 연결하지 못했습니다.');
@@ -466,6 +556,9 @@ export const MapPage: React.FC = () => {
 
     positionSource.onerror = handleStreamError;
     batterySource.onerror = handleStreamError;
+    heatmapSource.onerror = () => {
+      console.warn('Heatmap SSE disconnected.');
+    };
 
     syncMapOverview();
     const interval = setInterval(syncMapOverview, OVERVIEW_REFRESH_MS);
@@ -475,6 +568,7 @@ export const MapPage: React.FC = () => {
       clearInterval(interval);
       positionSource.close();
       batterySource.close();
+      heatmapSource.close();
     };
   }, []);
 
@@ -484,8 +578,9 @@ export const MapPage: React.FC = () => {
       [],
     );
     const firePoints = fires.map((fire) => [fire.lat, fire.lng] as Coordinate);
-    return [...pathPoints, ...firePoints];
-  }, [dronePaths, fires]);
+    const heatmapPoints = heatmapOverlay ? heatmapOverlay.bounds : [];
+    return [...pathPoints, ...firePoints, ...heatmapPoints];
+  }, [dronePaths, fires, heatmapOverlay]);
   const selectedDrone = useMemo(
     () => drones.find((drone) => drone.id === activeDrone) ?? null,
     [activeDrone, drones],
@@ -560,6 +655,14 @@ export const MapPage: React.FC = () => {
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
             />
+            {heatmapOverlay && (
+              <ImageOverlay
+                url={heatmapOverlay.imageUrl}
+                bounds={heatmapOverlay.bounds}
+                opacity={heatmapOverlay.opacity}
+                zIndex={300}
+              />
+            )}
             <ZoomControl position="bottomright" />
 
             {drones.map((drone, index) => {
