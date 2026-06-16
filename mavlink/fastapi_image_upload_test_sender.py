@@ -8,7 +8,7 @@ from urllib import error, request
 
 
 # 업로드 테스트에 사용할 로컬 이미지 파일 경로
-IMAGE_PATH = Path(os.getenv("IMAGE_PATH", r"C:\test\images.jpeg"))
+IMAGE_PATH = Path(os.getenv("IMAGE_PATH", r"C:\test\images.jpg"))
 IR_IMAGE_PATH = Path(os.getenv("IR_IMAGE_PATH", str(IMAGE_PATH)))
 # 이미지를 보낼 FastAPI 업로드 엔드포인트 URL
 TARGET_URL = os.getenv("TARGET_URL", "http://127.0.0.1:14551/fire-detections/upload")

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ImageOverlay, MapContainer, TileLayer, Marker, Popup, Polyline, ZoomControl, useMap } from 'react-leaflet';
 import { Card, CardContent } from '../components/ui/Card';
-import { Navigation, Flame, Battery } from 'lucide-react';
+import { Navigation, Flame, Battery, Layers, X } from 'lucide-react';
 import L from 'leaflet';
 import { API_BASE_URL, USE_MOCK_DATA, apiClient } from '../api/config';
 
@@ -529,6 +529,8 @@ export const MapPage: React.FC = () => {
   const [fires, setFires] = useState<FireMarker[]>(USE_MOCK_DATA ? mockFires : []);
   const [heatmapOverlay, setHeatmapOverlay] = useState<HeatmapOverlayState | null>(null);
   const [heatmapFrameIndex, setHeatmapFrameIndex] = useState(0);
+  const [heatmapReplayRequest, setHeatmapReplayRequest] = useState(0);
+  const [heatmapReplayLatest, setHeatmapReplayLatest] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -559,7 +561,6 @@ export const MapPage: React.FC = () => {
 
     const positionSource = new EventSource(apiUrl('/drones/position/stream'));
     const batterySource = new EventSource(apiUrl(`/drones/battery/stream?interval_sec=${BATTERY_SSE_REFRESH_SEC}`));
-    const heatmapSource = new EventSource(apiUrl('/heatmaps/stream'));
 
     positionSource.addEventListener('position', (event) => {
       try {
@@ -641,6 +642,38 @@ export const MapPage: React.FC = () => {
       }
     });
 
+    const handleStreamError = () => {
+      if (isMounted) {
+        setLoadError('실시간 드론 데이터를 연결하지 못했습니다.');
+      }
+    };
+
+    positionSource.onerror = handleStreamError;
+    batterySource.onerror = handleStreamError;
+
+    syncMapOverview();
+    const interval = setInterval(syncMapOverview, OVERVIEW_REFRESH_MS);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      positionSource.close();
+      batterySource.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (USE_MOCK_DATA) {
+      return;
+    }
+
+    let isMounted = true;
+    const heatmapSource = new EventSource(
+      apiUrl(
+        `/heatmaps/stream?replay_latest=${heatmapReplayLatest ? 'true' : 'false'}&request_id=${heatmapReplayRequest}`,
+      ),
+    );
+
     const handleHeatmapEvent = (event: MessageEvent) => {
       try {
         const payload = JSON.parse(event.data) as HeatmapOverlayPayload;
@@ -656,30 +689,15 @@ export const MapPage: React.FC = () => {
 
     heatmapSource.addEventListener('heatmap', handleHeatmapEvent);
     heatmapSource.onmessage = handleHeatmapEvent;
-
-    const handleStreamError = () => {
-      if (isMounted) {
-        setLoadError('실시간 드론 데이터를 연결하지 못했습니다.');
-      }
-    };
-
-    positionSource.onerror = handleStreamError;
-    batterySource.onerror = handleStreamError;
     heatmapSource.onerror = () => {
       console.warn('Heatmap SSE disconnected.');
     };
 
-    syncMapOverview();
-    const interval = setInterval(syncMapOverview, OVERVIEW_REFRESH_MS);
-
     return () => {
       isMounted = false;
-      clearInterval(interval);
-      positionSource.close();
-      batterySource.close();
       heatmapSource.close();
     };
-  }, []);
+  }, [heatmapReplayLatest, heatmapReplayRequest]);
 
   const mapFitPoints = useMemo(() => {
     const pathPoints = Object.values(dronePaths).reduce<Coordinate[]>(
@@ -718,6 +736,16 @@ export const MapPage: React.FC = () => {
   const toggleActiveDrone = (droneId: string) => {
     setActiveDrone((currentDroneId) => (currentDroneId === droneId ? null : droneId));
   };
+  const loadLatestHeatmap = () => {
+    setHeatmapReplayLatest(true);
+    setHeatmapReplayRequest((requestId) => requestId + 1);
+  };
+  const clearHeatmap = () => {
+    setHeatmapOverlay(null);
+    setHeatmapFrameIndex(0);
+    setHeatmapReplayLatest(false);
+    setHeatmapReplayRequest((requestId) => requestId + 1);
+  };
 
   return (
     <div className="h-[calc(100vh-6rem)] flex flex-col space-y-4">
@@ -733,6 +761,26 @@ export const MapPage: React.FC = () => {
             <Flame size={16} className="text-red-500" />
             <span>화재 ({fires.length})</span>
           </div>
+          <button
+            type="button"
+            onClick={loadLatestHeatmap}
+            className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-md shadow-sm border border-slate-200 text-sm hover:bg-slate-50 transition-colors"
+            title="최신 히트맵 불러오기"
+          >
+            <Layers size={16} className="text-amber-500" />
+            <span>최신 히트맵</span>
+          </button>
+          {heatmapOverlay && (
+            <button
+              type="button"
+              onClick={clearHeatmap}
+              className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-md shadow-sm border border-slate-200 text-sm hover:bg-slate-50 transition-colors"
+              title="새 히트맵이 들어올 때까지 현재 히트맵 받지 않기"
+            >
+              <X size={16} className="text-slate-500" />
+              <span>새 히트맵까지 중지</span>
+            </button>
+          )}
         </div>
       </div>
 

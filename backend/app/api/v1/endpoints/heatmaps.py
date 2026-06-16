@@ -175,6 +175,7 @@ async def stream_heatmaps(
     request: Request,
     heartbeat_sec: float = Query(15.0, ge=1, le=60),
     stream_key: str = Query(HEATMAP_STREAM_KEY, min_length=1),
+    replay_latest: bool = Query(True),
 ):
     async def event_generator():
         if not runtime.redis_client:
@@ -182,7 +183,7 @@ async def stream_heatmaps(
             return
 
         last_id = "$"
-        latest_entries = runtime.redis_client.xrevrange(stream_key, count=1)
+        latest_entries = runtime.redis_client.xrevrange(stream_key, count=1) if replay_latest else []
         if latest_entries:
             latest_id, fields = latest_entries[0]
             payload = _payload_from_fields(fields)
