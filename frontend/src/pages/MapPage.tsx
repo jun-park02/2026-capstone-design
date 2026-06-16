@@ -651,6 +651,52 @@ const DroneFocus: React.FC<{ drone: Drone | null }> = ({ drone }) => {
   return null;
 };
 
+const HeatmapLabelOverlay: React.FC<{
+  coordinates: [Coordinate, Coordinate];
+  label: string;
+}> = ({ coordinates, label }) => {
+  const map = useMap();
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+
+  useEffect(() => {
+    const updatePosition = () => {
+      const bounds = L.latLngBounds(coordinates);
+      const bottomRight = map.latLngToContainerPoint(bounds.getSouthEast());
+      const mapSize = map.getSize();
+
+      setPosition({
+        left: Math.min(Math.max(bottomRight.x, 16), mapSize.x - 16),
+        top: Math.min(Math.max(bottomRight.y, 16), mapSize.y - 16),
+      });
+    };
+
+    updatePosition();
+    map.on('move zoom resize', updatePosition);
+
+    return () => {
+      map.off('move zoom resize', updatePosition);
+    };
+  }, [coordinates, map]);
+
+  if (!position) {
+    return null;
+  }
+
+  return (
+    <div
+      className="pointer-events-none absolute z-[500] -translate-x-full -translate-y-full rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-sm font-medium text-slate-800 shadow-sm"
+      style={{
+        left: position.left,
+        top: position.top,
+        marginLeft: -8,
+        marginTop: -8,
+      }}
+    >
+      {label}
+    </div>
+  );
+};
+
 export const MapPage: React.FC = () => {
   const [activeDrone, setActiveDrone] = useState<string | null>(null);
   const [drones, setDrones] = useState<Drone[]>(USE_MOCK_DATA ? mockDrones : []);
@@ -995,6 +1041,12 @@ export const MapPage: React.FC = () => {
                 zIndex={300}
               />
             )}
+            {heatmapOverlay && currentHeatmapFrame && (
+              <HeatmapLabelOverlay
+                coordinates={heatmapOverlay.coordinates}
+                label={currentHeatmapFrame.label}
+              />
+            )}
             <ZoomControl position="bottomright" />
 
             {drones.map((drone, index) => {
@@ -1055,11 +1107,6 @@ export const MapPage: React.FC = () => {
               </Marker>
             ))}
           </MapContainer>
-          {heatmapOverlay && currentHeatmapFrame && (
-            <div className="pointer-events-none absolute left-4 bottom-4 z-[500] rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-sm font-medium text-slate-800 shadow-sm">
-              {currentHeatmapFrame.label}
-            </div>
-          )}
         </Card>
       </div>
     </div>
