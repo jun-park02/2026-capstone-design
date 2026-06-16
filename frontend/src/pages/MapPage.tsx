@@ -6,7 +6,7 @@ import L from 'leaflet';
 import { API_BASE_URL, USE_MOCK_DATA, apiClient } from '../api/config';
 
 const DRONE_FOCUS_ZOOM = 16;
-const OVERVIEW_REFRESH_MS = 30000;
+const OVERVIEW_REFRESH_MS = 1000;
 const BATTERY_SSE_REFRESH_SEC = 0.5;
 const MAX_LIVE_PATH_POINTS = 500;
 const DEFAULT_HEATMAP_OPACITY = 0.35;
@@ -169,9 +169,9 @@ interface StreamResponse<T> {
 }
 
 const mockDrones: Drone[] = [
-  { id: 'DRN-01', lat: 37.5665, lng: 126.9780, alt: 120, relativeAlt: 38, heading: 35, battery: 85, va: 12.4, voltage: 49.48, vehicleStatus: 'MC_FLYING', armed: true, flightEnable: true },
-  { id: 'DRN-02', lat: 37.5700, lng: 126.9820, alt: 110, relativeAlt: 31, heading: 125, battery: 42, va: 9.7, voltage: 47.92, vehicleStatus: 'MC_ARMED_STANDBY', armed: true, flightEnable: false },
-  { id: 'DRN-03', lat: 37.5600, lng: 126.9900, alt: 130, relativeAlt: 45, heading: 285, battery: 90, va: 10.9, voltage: 50.04, vehicleStatus: 'MC_STANDBY', armed: false, flightEnable: false },
+  { id: 'DRN-01', lat: 37.5665, lng: 126.9780, alt: 120, relativeAlt: 38, heading: 35, battery: 85, va: 12.4, voltage: 49.48, vehicleStatus: 'MC_MODE_FLYING', armed: true, flightEnable: true },
+  { id: 'DRN-02', lat: 37.5700, lng: 126.9820, alt: 110, relativeAlt: 31, heading: 125, battery: 42, va: 9.7, voltage: 47.92, vehicleStatus: 'ARMED', armed: true, flightEnable: false },
+  { id: 'DRN-03', lat: 37.5600, lng: 126.9900, alt: 130, relativeAlt: 45, heading: 285, battery: 90, va: 10.9, voltage: 50.04, vehicleStatus: 'DISARMED', armed: false, flightEnable: false },
 ];
 
 const mockFires: FireMarker[] = [
@@ -222,20 +222,57 @@ const formatBattery = (battery: number | null) => (
   battery === null ? '-' : `${Math.round(battery)}%`
 );
 
-const formatArmed = (armed: boolean | null) => {
+const statusTextFromVehicleStatus = (status: string | null) => {
+  switch (status) {
+    case 'DISARMED':
+      return '시동꺼짐';
+    case 'ARMED':
+      return '시동중';
+    case 'MC_MODE_FLYING':
+      return '멀티콥터 비행중';
+    case 'FW_MODE_FLYING':
+      return '고정익 비행중';
+    case 'TRANSITION':
+      return '전방 천이 중';
+    case 'BACKTRANSITION':
+      return '역 천이중';
+    case 'INVALID_STATE':
+      return '유효하지 않는 상태';
+    default:
+      return null;
+  }
+};
+
+const formatArmed = (armed: boolean | null, vehicleStatus: string | null = null) => {
+  if (vehicleStatus === 'DISARMED') {
+    return '시동꺼짐';
+  }
+  if (vehicleStatus && ['ARMED', 'MC_MODE_FLYING', 'FW_MODE_FLYING', 'TRANSITION', 'BACKTRANSITION'].includes(vehicleStatus)) {
+    return '시동중';
+  }
+  if (vehicleStatus === 'INVALID_STATE') {
+    return '유효하지 않는 상태';
+  }
   if (armed === null) {
     return '시동 -';
   }
 
-  return armed ? '시동' : '시동 꺼짐';
+  return armed ? '시동중' : '시동꺼짐';
 };
 
-const formatFlightEnable = (flightEnable: boolean | null) => {
+const formatFlightEnable = (flightEnable: boolean | null, vehicleStatus: string | null = null) => {
+  const statusText = statusTextFromVehicleStatus(vehicleStatus);
+  if (statusText) {
+    if (vehicleStatus === 'DISARMED' || vehicleStatus === 'ARMED') {
+      return '비행 아님';
+    }
+    return statusText;
+  }
   if (flightEnable === null) {
     return '비행 -';
   }
 
-  return flightEnable ? '비행가능' : '비행불가능';
+  return flightEnable ? '비행중' : '비행 아님';
 };
 
 const conditionPillClass = (enabled: boolean | null) => {
@@ -276,7 +313,7 @@ const formatVoltage = (value: number | null) => {
 const formatDroneLabel = (droneId: string) => `drone#${droneId}`;
 
 const createDroneIcon = (heading: number | null) => {
-  const rotation = normalizeHeading(heading);
+  const rotation = normalizeHeading((heading ?? 0) + 90);
 
   return L.divIcon({
     className: 'drone-heading-marker',
@@ -332,6 +369,17 @@ const normalizeVehicleStatus = (status: unknown): string | null => {
 
 const flagsFromVehicleStatus = (status: string | null) => {
   switch (status) {
+    case 'DISARMED':
+      return { armed: false, flightEnable: false };
+    case 'ARMED':
+      return { armed: true, flightEnable: false };
+    case 'MC_MODE_FLYING':
+    case 'FW_MODE_FLYING':
+    case 'TRANSITION':
+    case 'BACKTRANSITION':
+      return { armed: true, flightEnable: true };
+    case 'INVALID_STATE':
+      return { armed: false, flightEnable: false };
     case 'MC_STANDBY':
       return { armed: false, flightEnable: false };
     case 'MC_ARMED_STANDBY':
@@ -998,10 +1046,10 @@ export const MapPage: React.FC = () => {
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm text-slate-600">
                     <div className="col-span-2 flex flex-wrap gap-2">
                       <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${conditionPillClass(drone.armed)}`}>
-                        {formatArmed(drone.armed)}
+                        {formatArmed(drone.armed, drone.vehicleStatus)}
                       </span>
                       <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${conditionPillClass(drone.flightEnable)}`}>
-                        {formatFlightEnable(drone.flightEnable)}
+                        {formatFlightEnable(drone.flightEnable, drone.vehicleStatus)}
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5 font-medium text-slate-700">
@@ -1075,8 +1123,8 @@ export const MapPage: React.FC = () => {
                   <div className="p-1">
                     <h4 className="font-bold text-slate-800 border-b pb-1 mb-2">{formatDroneLabel(drone.id)}</h4>
                     <div className="space-y-1 text-sm">
-                      <p><span className="text-slate-500">시동:</span> <span className={conditionTextClass(drone.armed)}>{formatArmed(drone.armed)}</span></p>
-                      <p><span className="text-slate-500">비행:</span> <span className={conditionTextClass(drone.flightEnable)}>{formatFlightEnable(drone.flightEnable)}</span></p>
+                      <p><span className="text-slate-500">시동:</span> <span className={conditionTextClass(drone.armed)}>{formatArmed(drone.armed, drone.vehicleStatus)}</span></p>
+                      <p><span className="text-slate-500">비행:</span> <span className={conditionTextClass(drone.flightEnable)}>{formatFlightEnable(drone.flightEnable, drone.vehicleStatus)}</span></p>
                       <p><span className="text-slate-500">배터리:</span> {formatBattery(drone.battery)}</p>
                       <p><span className="text-slate-500">전압:</span> {formatVoltage(drone.voltage)}</p>
                       <p><span className="text-slate-500">고도:</span> {formatMeters(drone.alt)}</p>

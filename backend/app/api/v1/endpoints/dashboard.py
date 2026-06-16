@@ -84,6 +84,35 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _parse_datetime_or_none(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(UTC).replace(tzinfo=None)
+        return value
+
+    if value is None or value == "":
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
+
+
 def _month_start(value: date) -> date:
     return value.replace(day=1)
 
@@ -272,10 +301,14 @@ def _drone_warning_error_count(session: Session, *, start_at: datetime, end_at: 
     return count
 
 
-def _average_battery_percent(session: Session, *, limit: int = 500) -> float:
+def _average_battery_percent(session: Session, *, recent_seconds: int = 15, limit: int = 500) -> float:
+    threshold_at = datetime.utcnow() - timedelta(seconds=recent_seconds)
     rows = session.scalars(
         select(DroneTelemetry)
-        .where(DroneTelemetry.message_type.in_(["SYS_STATUS", "BATTERY_STATUS"]))
+        .where(
+            DroneTelemetry.telemetry_at >= threshold_at,
+            DroneTelemetry.message_type.in_(["SYS_STATUS", "BATTERY_STATUS"]),
+        )
         .order_by(DroneTelemetry.telemetry_at.desc(), DroneTelemetry.id.desc())
         .limit(limit)
     ).all()
@@ -302,11 +335,12 @@ def _average_battery_percent(session: Session, *, limit: int = 500) -> float:
     return round(sum(values) / len(values), 1)
 
 
-def _cached_drone_paths(point_limit: int = 200) -> list[dict[str, Any]]:
+def _cached_drone_paths(*, recent_seconds: int = 15, point_limit: int = 200) -> list[dict[str, Any]]:
     if not runtime.redis_client:
         return []
 
     try:
+        threshold_at = datetime.utcnow() - timedelta(seconds=recent_seconds)
         drone_ids = sorted(runtime.redis_client.smembers(DRONE_PATH_IDS_KEY), key=_drone_sort_key)
         paths = []
         for drone_id in drone_ids:
@@ -315,6 +349,9 @@ def _cached_drone_paths(point_limit: int = 200) -> list[dict[str, Any]]:
             for entry in entries:
                 point = _parse_json(entry)
                 if not isinstance(point, dict):
+                    continue
+                point_at = _parse_datetime_or_none(point.get("telemetry_at") or point.get("timestamp"))
+                if point_at is None or point_at < threshold_at:
                     continue
                 lat = _to_float(point.get("lat"))
                 lon = _to_float(point.get("lon"))
@@ -340,10 +377,12 @@ def _cached_drone_paths(point_limit: int = 200) -> list[dict[str, Any]]:
         return []
 
 
-def _db_drone_paths(session: Session, *, point_limit: int = 200) -> list[dict[str, Any]]:
+def _db_drone_paths(session: Session, *, recent_seconds: int = 15, point_limit: int = 200) -> list[dict[str, Any]]:
+    threshold_at = datetime.utcnow() - timedelta(seconds=recent_seconds)
     rows = session.scalars(
         select(DroneTelemetry)
         .where(
+            DroneTelemetry.telemetry_at >= threshold_at,
             DroneTelemetry.message_type == "GLOBAL_POSITION_INT",
             DroneTelemetry.lat.is_not(None),
             DroneTelemetry.lon.is_not(None),
@@ -378,11 +417,11 @@ def _db_drone_paths(session: Session, *, point_limit: int = 200) -> list[dict[st
     ]
 
 
-def _dashboard_drone_paths(session: Session) -> list[dict[str, Any]]:
-    cached_paths = _cached_drone_paths()
+def _dashboard_drone_paths(session: Session, *, recent_seconds: int = 15) -> list[dict[str, Any]]:
+    cached_paths = _cached_drone_paths(recent_seconds=recent_seconds)
     if cached_paths:
         return cached_paths
-    return _db_drone_paths(session)
+    return _db_drone_paths(session, recent_seconds=recent_seconds)
 
 
 def _recent_fire_positions(
@@ -524,8 +563,9 @@ def get_dashboard_summary(
         drone_alt = primary_latest.get("alt") or 0
     else:
         # 아직 드론 좌표가 없으면 기본 지도 중심 좌표로 대체한다.
-        drone_lat, drone_lon = DEFAULT_MAP_CENTER
-        drone_alt = 0
+        drone_lat = None
+        drone_lon = None
+        drone_alt = None
 
     # 오늘 발생한 실제 화재 위치 목록만 지도 마커로 사용한다.
     fire_locations = _recent_fire_positions(

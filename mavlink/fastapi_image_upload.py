@@ -10,6 +10,8 @@ import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 import socket
 import struct
+import cv2
+import numpy as np
 
 
 # Redis 서버 주소
@@ -318,6 +320,34 @@ async def upload_heatmap_image(
         f"heatmap_id={heatmap_id} count={len(saved_images)} stream_id={msg_id}"
     )
 
+    while True:
+        cnt = 0
+
+        img = cv2.imread(f'./heatmap-{heatmap_id}_frame_00{cnt}.png')
+
+        if len(img.shape) == 3 and img.shape[2] == 4:
+            # 이미 알파 채널(4채널)이 있는 PNG라면 그대로 사용
+            rgba = img.copy()
+        else:
+            # 알파 채널이 없는 일반 PNG(또는 JPG)라면 알파 채널 추가
+            rgba = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+
+        # 3. 검은색 픽셀 조건 (R, G, B가 모두 10 이하)
+        # 이미 투명한 부분은 건드리지 않고, 검은색 픽셀만 찾습니다.
+
+        black_pixels = np.where(
+            (rgba[:, :, 2] <= 120)
+        )
+
+        # 4. 검은색 픽셀의 투명도(Alpha)를 0(완전 투명)으로 변경
+        rgba[black_pixels] = [0, 0, 0, 0]
+
+        # 5. 결과 저장
+        cv2.imwrite(f"./heatmap-{heatmap_id}_frame_00{cnt}.png", rgba)
+
+        if cnt == 5:
+            break
+
     return {
         "ok": True,
         "id": msg_id,
@@ -353,7 +383,7 @@ async def upload_fire_detection(
     lon: str | None = Form(None, examples=["126.9780"]),
     alt: str | None = Form(None, examples=["120.5"]),
     confidence: str | None = Form(None, examples=["0.92"]),
-    system_id: str | None = Form(None, examples=["1"]),
+    # system_id: str | None = Form(None, examples=["1"]),
     image_format: str | None = Form(None, examples=["jpg"]),
 ):
     print(rgb_image)
@@ -364,6 +394,7 @@ async def upload_fire_detection(
     if rgb_image is None:
         raise HTTPException(status_code=400, detail="RGB_image file is required")
 
+    system_id = metadata_obj.get("system_id")
     captured_at = first_value(captured_at, normalize_captured_at(metadata_obj.get("timestamp")))
 
     lat = gps.get("Latitude") if gps is not None else 0
@@ -454,7 +485,7 @@ async def upload_fire_detection(
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
                 client_socket.settimeout(5)
-                client_socket.connect(("192.168.1.127", 50000))
+                client_socket.connect(("192.168.0.31", 50000))
 
                 # lat = 36.693575
                 # lon = 126.580372 
@@ -463,8 +494,8 @@ async def upload_fire_detection(
                 # client_socket.sendall(data)
 
                 message = {
-                    "latitude": 40.693575,
-                    "longitude": 130.580372 
+                    "lat": 36.693575 if lat is None else lat,
+                    "lon": 126.580372 if lon is None else lon
                 }
 
                 # JSON 문자열 + 개행 문자

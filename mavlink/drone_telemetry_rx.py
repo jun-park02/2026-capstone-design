@@ -35,14 +35,40 @@ MAV_STATE_NAMES = {
     8: "MAV_STATE_FLIGHT_TERMINATION",
 }
 
+STATUS_CODE_TO_VEHICLE_STATUS = {
+    0: "DISARMED",
+    1: "ARMED",
+    2: "MC_MODE_FLYING",
+    3: "FW_MODE_FLYING",
+    4: "TRANSITION",
+    5: "BACKTRANSITION",
+    6: "INVALID_STATE",
+}
+
 VEHICLE_STATUS_TO_FLAGS = {
+    "DISARMED": {"armed": False, "flight_enable": False},
+    "ARMED": {"armed": True, "flight_enable": False},
+    "MC_MODE_FLYING": {"armed": True, "flight_enable": True},
+    "FW_MODE_FLYING": {"armed": True, "flight_enable": True},
+    "TRANSITION": {"armed": True, "flight_enable": True},
+    "BACKTRANSITION": {"armed": True, "flight_enable": True},
+    "INVALID_STATE": {"armed": False, "flight_enable": False},
+    # Backward compatibility for older test senders.
     "MC_STANDBY": {"armed": False, "flight_enable": False},
     "MC_ARMED_STANDBY": {"armed": True, "flight_enable": False},
     "MC_FLYING": {"armed": True, "flight_enable": True},
-    "MC_INVALID_STATE": {"armed": False, "flight_enable": True},
+    "MC_INVALID_STATE": {"armed": False, "flight_enable": False},
 }
 
 VEHICLE_STATUS_TO_MAV_STATE = {
+    "DISARMED": 3,
+    "ARMED": 3,
+    "MC_MODE_FLYING": 4,
+    "FW_MODE_FLYING": 4,
+    "TRANSITION": 4,
+    "BACKTRANSITION": 4,
+    "INVALID_STATE": 5,
+    # Backward compatibility for older test senders.
     "MC_STANDBY": 3,
     "MC_ARMED_STANDBY": 3,
     "MC_FLYING": 4,
@@ -120,6 +146,9 @@ def normalize_simtime_to_time_boot_ms(value: Any) -> int | None:
 
 
 def normalize_vehicle_status(value: Any) -> str:
+    code = to_int(value)
+    if code is not None and code in STATUS_CODE_TO_VEHICLE_STATUS:
+        return STATUS_CODE_TO_VEHICLE_STATUS[code]
     return str(value or "UNKNOWN").strip().upper() or "UNKNOWN"
 
 

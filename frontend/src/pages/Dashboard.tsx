@@ -66,6 +66,15 @@ const mockDashboardData = {
 
 const COLORS = ['#ef4444', '#94a3b8'];
 type Coordinate = [number, number];
+const DEFAULT_MAP_CENTER: Coordinate = [37.5665, 126.9780];
+
+const formatLocationValue = (value: number | string | null | undefined, suffix = '') => {
+  if (value === null || value === undefined || value === '') {
+    return '-';
+  }
+
+  return `${value}${suffix}`;
+};
 
 const MapAutoFit: React.FC<{ points: Coordinate[] }> = ({ points }) => {
   const map = useMap();
@@ -123,7 +132,10 @@ export const Dashboard: React.FC = () => {
   }
 
   const fireLocations = data.fireLocations ?? [];
-  const mapCenter: Coordinate = fireLocations[0] ?? [data.droneLocation.lat, data.droneLocation.lng];
+  const droneLat = data.droneLocation?.lat;
+  const droneLng = data.droneLocation?.lng;
+  const hasDroneLocation = droneLat !== null && droneLat !== undefined && droneLng !== null && droneLng !== undefined;
+  const mapCenter: Coordinate = fireLocations[0] ?? (hasDroneLocation ? [droneLat, droneLng] : DEFAULT_MAP_CENTER);
 
   return (
     <div className="space-y-6">
@@ -234,15 +246,15 @@ export const Dashboard: React.FC = () => {
               <div className="grid grid-cols-3 gap-2 text-center">
                 <div className="bg-slate-50 p-2 rounded">
                   <div className="text-xs text-slate-500">위도</div>
-                  <div className="font-medium text-slate-800">{data.droneLocation.lat}</div>
+                  <div className="font-medium text-slate-800">{formatLocationValue(data.droneLocation?.lat)}</div>
                 </div>
                 <div className="bg-slate-50 p-2 rounded">
                   <div className="text-xs text-slate-500">경도</div>
-                  <div className="font-medium text-slate-800">{data.droneLocation.lng}</div>
+                  <div className="font-medium text-slate-800">{formatLocationValue(data.droneLocation?.lng)}</div>
                 </div>
                 <div className="bg-slate-50 p-2 rounded">
                   <div className="text-xs text-slate-500">고도</div>
-                  <div className="font-medium text-slate-800">{data.droneLocation.alt}m</div>
+                  <div className="font-medium text-slate-800">{formatLocationValue(data.droneLocation?.alt, 'm')}</div>
                 </div>
               </div>
             </div>

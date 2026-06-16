@@ -66,7 +66,16 @@ BATTERY_VOLTAGE = float(os.getenv("BATTERY_VOLTAGE", "49.48"))
 # 배터리가 최저 비율까지 내려갔을 때 같이 낮출 전압 폭
 BATTERY_VOLTAGE_DROP = float(os.getenv("BATTERY_VOLTAGE_DROP", "0"))
 # 전송 payload에 넣을 드론 상태 값
-VEHICLE_STATUS = os.getenv("VEHICLE_STATUS", "MC_FLYING")
+VEHICLE_STATUS = os.getenv("VEHICLE_STATUS", "2")
+STATUS_MAP = {
+    0: "DISARMED",
+    1: "ARMED",
+    2: "MC_MODE_FLYING",
+    3: "FW_MODE_FLYING",
+    4: "TRANSITION",
+    5: "BACKTRANSITION",
+    6: "INVALID_STATE",
+}
 # 위도 1도를 미터로 환산할 때 사용하는 근사값
 METERS_PER_DEGREE_LAT = 111_320
 
@@ -114,6 +123,15 @@ def dynamic_battery_voltage(soc: float) -> float:
     usable_soc = max(BATTERY_SOC - min(BATTERY_SOC, max(0.0, BATTERY_MIN_SOC)), 1e-9)
     drain_ratio = min(max((BATTERY_SOC - soc) / usable_soc, 0.0), 1.0)
     return BATTERY_VOLTAGE - (BATTERY_VOLTAGE_DROP * drain_ratio)
+
+
+def normalize_vehicle_status(value: str) -> int | str:
+    try:
+        status_code = int(value)
+    except (TypeError, ValueError):
+        return str(value).strip().upper()
+
+    return STATUS_MAP.get(status_code, status_code)
 
 
 def get_position(seq: int) -> tuple[float, float, float, float]:
@@ -185,7 +203,7 @@ def build_payload(seq: int, started_at: float) -> dict:
             "soc": round(battery_soc, 4),
             "voltage": round(battery_voltage, 2),
         },
-        "vehicle_status": VEHICLE_STATUS,
+        "vehicle_status": normalize_vehicle_status(VEHICLE_STATUS),
     }
 
 
