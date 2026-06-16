@@ -28,9 +28,14 @@ interface Drone {
   lat: number;
   lng: number;
   alt: number | null;
+  relativeAlt: number | null;
   heading: number | null;
   battery: number | null;
-  status: '정상' | '경고';
+  va: number | null;
+  voltage: number | null;
+  vehicleStatus: string | null;
+  armed: boolean | null;
+  flightEnable: boolean | null;
 }
 
 interface FireMarker {
@@ -47,6 +52,11 @@ interface BackendDronePoint {
   lat?: number | string | null;
   lon?: number | string | null;
   alt?: number | string | null;
+  relative_alt?: number | string | null;
+  va?: number | string | null;
+  vehicle_status?: string | null;
+  armed?: boolean | number | string | null;
+  flight_enable?: boolean | number | string | null;
   heading?: number | string | null;
   position?: unknown;
 }
@@ -59,6 +69,9 @@ interface BackendDronePath {
   current_battery?: number | string | null;
   battery_soc?: number | string | null;
   battery_telemetry_at?: string | null;
+  vehicle_status?: string | null;
+  armed?: boolean | number | string | null;
+  flight_enable?: boolean | number | string | null;
   path?: BackendDronePoint[];
   positions?: unknown[];
   latest?: BackendDronePoint | null;
@@ -85,6 +98,11 @@ interface DronePositionStreamItem {
   lat?: number | string | null;
   lon?: number | string | null;
   alt?: number | string | null;
+  relative_alt?: number | string | null;
+  va?: number | string | null;
+  vehicle_status?: string | null;
+  armed?: boolean | number | string | null;
+  flight_enable?: boolean | number | string | null;
   heading?: number | string | null;
   position?: unknown;
 }
@@ -93,6 +111,7 @@ interface DroneBatteryStreamItem {
   drone_id?: string | number | null;
   system_id?: string | number | null;
   battery_remaining?: number | string | null;
+  voltage_battery?: number | string | null;
 }
 
 interface HeatmapCorner {
@@ -150,9 +169,9 @@ interface StreamResponse<T> {
 }
 
 const mockDrones: Drone[] = [
-  { id: 'DRN-01', lat: 37.5665, lng: 126.9780, alt: 120, heading: 35, battery: 85, status: '정상' },
-  { id: 'DRN-02', lat: 37.5700, lng: 126.9820, alt: 110, heading: 125, battery: 42, status: '경고' },
-  { id: 'DRN-03', lat: 37.5600, lng: 126.9900, alt: 130, heading: 285, battery: 90, status: '정상' },
+  { id: 'DRN-01', lat: 37.5665, lng: 126.9780, alt: 120, relativeAlt: 38, heading: 35, battery: 85, va: 12.4, voltage: 49.48, vehicleStatus: 'MC_FLYING', armed: true, flightEnable: true },
+  { id: 'DRN-02', lat: 37.5700, lng: 126.9820, alt: 110, relativeAlt: 31, heading: 125, battery: 42, va: 9.7, voltage: 47.92, vehicleStatus: 'MC_ARMED_STANDBY', armed: true, flightEnable: false },
+  { id: 'DRN-03', lat: 37.5600, lng: 126.9900, alt: 130, relativeAlt: 45, heading: 285, battery: 90, va: 10.9, voltage: 50.04, vehicleStatus: 'MC_STANDBY', armed: false, flightEnable: false },
 ];
 
 const mockFires: FireMarker[] = [
@@ -196,12 +215,65 @@ const normalizeHeading = (heading: number | null) => {
 };
 
 const formatHeading = (heading: number | null) => (
-  heading === null ? '-' : `${Math.round(normalizeHeading(heading))} deg`
+  heading === null ? '-' : `${Math.round(normalizeHeading(heading))}°`
 );
 
 const formatBattery = (battery: number | null) => (
   battery === null ? '-' : `${Math.round(battery)}%`
 );
+
+const formatArmed = (armed: boolean | null) => {
+  if (armed === null) {
+    return '시동 -';
+  }
+
+  return armed ? '시동' : '시동 꺼짐';
+};
+
+const formatFlightEnable = (flightEnable: boolean | null) => {
+  if (flightEnable === null) {
+    return '비행 -';
+  }
+
+  return flightEnable ? '비행가능' : '비행불가능';
+};
+
+const conditionPillClass = (enabled: boolean | null) => {
+  if (enabled === null) {
+    return 'bg-slate-100 text-slate-500 border-slate-200';
+  }
+
+  return enabled
+    ? 'bg-green-100 text-green-700 border-green-200'
+    : 'bg-orange-100 text-orange-700 border-orange-200';
+};
+
+const conditionTextClass = (enabled: boolean | null) => {
+  if (enabled === null) {
+    return 'text-slate-500 font-medium';
+  }
+
+  return enabled ? 'text-green-600 font-medium' : 'text-orange-600 font-medium';
+};
+
+const formatMeters = (value: number | null) => (
+  value === null ? '-' : `${Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(1)}m`
+);
+
+const formatSpeed = (value: number | null) => (
+  value === null ? '-' : `${value.toFixed(1)}m/s`
+);
+
+const formatVoltage = (value: number | null) => {
+  if (value === null) {
+    return '-';
+  }
+
+  const volts = Math.abs(value) > 1000 ? value / 1000 : value;
+  return `${volts.toFixed(2)}V`;
+};
+
+const formatDroneLabel = (droneId: string) => `drone#${droneId}`;
 
 const createDroneIcon = (heading: number | null) => {
   const rotation = normalizeHeading(heading);
@@ -226,6 +298,51 @@ const toNumber = (value: unknown): number | null => {
 
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : null;
+};
+
+const toBoolean = (value: unknown): boolean | null => {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  return null;
+};
+
+const normalizeVehicleStatus = (status: unknown): string | null => {
+  if (status === null || status === undefined || status === '') {
+    return null;
+  }
+
+  return String(status).trim().toUpperCase();
+};
+
+const flagsFromVehicleStatus = (status: string | null) => {
+  switch (status) {
+    case 'MC_STANDBY':
+      return { armed: false, flightEnable: false };
+    case 'MC_ARMED_STANDBY':
+      return { armed: true, flightEnable: false };
+    case 'MC_FLYING':
+      return { armed: true, flightEnable: true };
+    case 'MC_INVALID_STATE':
+      return { armed: false, flightEnable: true };
+    default:
+      return { armed: null, flightEnable: null };
+  }
 };
 
 const toCoordinate = (value: unknown): Coordinate | null => {
@@ -446,8 +563,15 @@ const transformOverview = (overview: MapOverviewResponse) => {
 
       const id = String(dronePath.drone_id ?? dronePath.system_id ?? `DRN-${index + 1}`);
       const latestAlt = toNumber(dronePath.latest?.alt);
+      const latestRelativeAlt = toNumber(dronePath.latest?.relative_alt);
+      const latestVa = toNumber(dronePath.latest?.va);
       const latestHeading = toNumber(dronePath.latest?.heading);
       const latestBattery = toNumber(dronePath.battery_remaining);
+      const latestVoltage = toNumber(dronePath.voltage_battery);
+      const vehicleStatus = normalizeVehicleStatus(dronePath.vehicle_status ?? dronePath.latest?.vehicle_status);
+      const statusFlags = flagsFromVehicleStatus(vehicleStatus);
+      const armed = toBoolean(dronePath.armed ?? dronePath.latest?.armed) ?? statusFlags.armed;
+      const flightEnable = toBoolean(dronePath.flight_enable ?? dronePath.latest?.flight_enable) ?? statusFlags.flightEnable;
       nextDronePaths[id] = path.length > 0 ? path : [latestPoint];
 
       return {
@@ -455,9 +579,14 @@ const transformOverview = (overview: MapOverviewResponse) => {
         lat: latestPoint[0],
         lng: latestPoint[1],
         alt: latestAlt,
+        relativeAlt: latestRelativeAlt,
         heading: latestHeading,
         battery: latestBattery,
-        status: '정상' as const,
+        va: latestVa,
+        voltage: latestVoltage,
+        vehicleStatus,
+        armed,
+        flightEnable,
       };
     })
     .filter((drone): drone is Drone => drone !== null);
@@ -578,14 +707,21 @@ export const MapPage: React.FC = () => {
             }
 
             const existingDrone = dronesById.get(id);
+            const vehicleStatus = normalizeVehicleStatus(item.vehicle_status) ?? existingDrone?.vehicleStatus ?? null;
+            const statusFlags = flagsFromVehicleStatus(vehicleStatus);
             dronesById.set(id, {
               id,
               lat: coordinate[0],
               lng: coordinate[1],
               alt: toNumber(item.alt) ?? existingDrone?.alt ?? null,
+              relativeAlt: toNumber(item.relative_alt) ?? existingDrone?.relativeAlt ?? null,
               heading: toNumber(item.heading) ?? existingDrone?.heading ?? null,
               battery: existingDrone?.battery ?? null,
-              status: existingDrone?.status ?? '정상',
+              va: toNumber(item.va) ?? existingDrone?.va ?? null,
+              voltage: existingDrone?.voltage ?? null,
+              vehicleStatus,
+              armed: toBoolean(item.armed) ?? statusFlags.armed ?? existingDrone?.armed ?? null,
+              flightEnable: toBoolean(item.flight_enable) ?? statusFlags.flightEnable ?? existingDrone?.flightEnable ?? null,
             });
           }
 
@@ -618,24 +754,34 @@ export const MapPage: React.FC = () => {
         const items = payload.items ?? [];
 
         setDrones((currentDrones) => {
-          const batteriesById = new Map<string, number | null>();
+          const batteriesById = new Map<string, { battery: number | null; voltage: number | null }>();
           for (const item of items) {
             const id = droneIdFromStreamItem(item);
             if (!id) {
               continue;
             }
-            batteriesById.set(id, toNumber(item.battery_remaining));
+            batteriesById.set(id, {
+              battery: toNumber(item.battery_remaining),
+              voltage: toNumber(item.voltage_battery),
+            });
           }
 
           if (batteriesById.size === 0) {
             return currentDrones;
           }
 
-          return currentDrones.map((drone) => (
-            batteriesById.has(drone.id)
-              ? { ...drone, battery: batteriesById.get(drone.id) ?? null }
-              : drone
-          ));
+          return currentDrones.map((drone) => {
+            const batteryUpdate = batteriesById.get(drone.id);
+            if (!batteryUpdate) {
+              return drone;
+            }
+
+            return {
+              ...drone,
+              battery: batteryUpdate.battery,
+              voltage: batteryUpdate.voltage ?? drone.voltage,
+            };
+          });
         });
       } catch (error) {
         console.error('Failed to parse drone battery SSE:', error);
@@ -785,9 +931,9 @@ export const MapPage: React.FC = () => {
       </div>
 
       <div className="flex-1 flex gap-4 relative">
-        <div className="w-80 flex-col gap-4 overflow-y-auto hidden md:flex">
+        <div className="w-96 flex-col gap-4 overflow-y-auto hidden md:flex">
           <Card className="border-slate-200 shadow-sm">
-            <div className="p-4 border-b border-slate-100 bg-slate-50 rounded-t-xl">
+            <div className="p-5 border-b border-slate-100 bg-slate-50 rounded-t-xl">
               <h3 className="font-semibold text-slate-800 flex items-center gap-2">
                 <Navigation size={18} className="text-blue-500" />
                 운용 중인 드론
@@ -797,21 +943,29 @@ export const MapPage: React.FC = () => {
               {drones.map((drone) => (
                 <div
                   key={drone.id}
-                  className={`p-4 hover:bg-slate-50 cursor-pointer transition-colors ${activeDrone === drone.id ? 'bg-blue-50 border-l-4 border-blue-500' : ''}`}
+                  className={`p-5 hover:bg-slate-50 cursor-pointer transition-colors ${activeDrone === drone.id ? 'bg-blue-50 border-l-4 border-blue-500' : ''}`}
                   onClick={() => toggleActiveDrone(drone.id)}
                 >
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="font-semibold text-slate-800">{drone.id}</span>
-                    <span className={`text-xs px-2 py-1 rounded-full font-medium ${drone.status === '정상' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'}`}>
-                      {drone.status}
-                    </span>
+                  <div className="flex justify-between items-center mb-3">
+                    <span className="text-base font-semibold text-slate-800">{formatDroneLabel(drone.id)}</span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-sm text-slate-600">
-                    <div className="flex items-center gap-1">
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm text-slate-600">
+                    <div className="col-span-2 flex flex-wrap gap-2">
+                      <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${conditionPillClass(drone.armed)}`}>
+                        {formatArmed(drone.armed)}
+                      </span>
+                      <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${conditionPillClass(drone.flightEnable)}`}>
+                        {formatFlightEnable(drone.flightEnable)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 font-medium text-slate-700">
                       <Battery size={14} />
                       {formatBattery(drone.battery)}
                     </div>
-                    <div>고도: {drone.alt === null ? '-' : `${drone.alt}m`}</div>
+                    <div>전압: {formatVoltage(drone.voltage)}</div>
+                    <div>고도: {formatMeters(drone.alt)}</div>
+                    <div>상대고도: {formatMeters(drone.relativeAlt)}</div>
+                    <div>속력: {formatSpeed(drone.va)}</div>
                     <div>헤딩: {formatHeading(drone.heading)}</div>
                   </div>
                 </div>
@@ -867,11 +1021,15 @@ export const MapPage: React.FC = () => {
               <Marker key={drone.id} position={[drone.lat, drone.lng]} icon={createDroneIcon(drone.heading)}>
                 <Popup className="rounded-lg">
                   <div className="p-1">
-                    <h4 className="font-bold text-slate-800 border-b pb-1 mb-2">{drone.id}</h4>
+                    <h4 className="font-bold text-slate-800 border-b pb-1 mb-2">{formatDroneLabel(drone.id)}</h4>
                     <div className="space-y-1 text-sm">
-                      <p><span className="text-slate-500">상태:</span> <span className={drone.status === '정상' ? 'text-green-600 font-medium' : 'text-orange-600 font-medium'}>{drone.status}</span></p>
+                      <p><span className="text-slate-500">시동:</span> <span className={conditionTextClass(drone.armed)}>{formatArmed(drone.armed)}</span></p>
+                      <p><span className="text-slate-500">비행:</span> <span className={conditionTextClass(drone.flightEnable)}>{formatFlightEnable(drone.flightEnable)}</span></p>
                       <p><span className="text-slate-500">배터리:</span> {formatBattery(drone.battery)}</p>
-                      <p><span className="text-slate-500">고도:</span> {drone.alt === null ? '-' : `${drone.alt}m`}</p>
+                      <p><span className="text-slate-500">전압:</span> {formatVoltage(drone.voltage)}</p>
+                      <p><span className="text-slate-500">고도:</span> {formatMeters(drone.alt)}</p>
+                      <p><span className="text-slate-500">상대고도:</span> {formatMeters(drone.relativeAlt)}</p>
+                      <p><span className="text-slate-500">속력:</span> {formatSpeed(drone.va)}</p>
                       <p><span className="text-slate-500">헤딩:</span> {formatHeading(drone.heading)}</p>
                       <p><span className="text-slate-500">위치:</span> {drone.lat.toFixed(4)}, {drone.lng.toFixed(4)}</p>
                     </div>

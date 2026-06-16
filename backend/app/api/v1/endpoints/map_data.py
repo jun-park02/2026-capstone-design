@@ -17,6 +17,7 @@ router = APIRouter(tags=["map"])
 DEFAULT_DRONE_STREAM_KEY = os.getenv("STREAM_KEY", "drone_telemetry")
 DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
 DRONE_PATH_KEY_PREFIX = os.getenv("DRONE_PATH_KEY_PREFIX", "drone:path")
+DRONE_STATUS_KEY_PREFIX = os.getenv("DRONE_STATUS_KEY_PREFIX", "drone:status")
 
 
 def _parse_json(value: Any) -> Any:
@@ -46,6 +47,22 @@ def _to_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_bool(value: Any) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _normalize_coordinate(value: Any, *, max_abs: float, scale: float = 1e7) -> float | None:
@@ -89,6 +106,30 @@ def _event_image_url(event: FireEvent) -> str | None:
     return None
 
 
+def _drone_status_key(drone_id: int | str) -> str:
+    return f"{DRONE_STATUS_KEY_PREFIX}:{drone_id}"
+
+
+def _format_drone_status(status: dict[str, Any] | None) -> dict[str, Any]:
+    if not status:
+        return {}
+
+    return {
+        "vehicle_status": status.get("vehicle_status") or None,
+        "armed": _to_bool(status.get("armed")),
+        "flight_enable": _to_bool(status.get("flight_enable")),
+        "system_status": _to_int(status.get("system_status")),
+        "system_status_name": status.get("system_status_name") or None,
+        "status_seen_at": status.get("last_seen_at") or None,
+    }
+
+
+def _get_drone_status(drone_id: int | str) -> dict[str, Any]:
+    if not runtime.redis_client:
+        return {}
+    return _format_drone_status(runtime.redis_client.hgetall(_drone_status_key(drone_id)))
+
+
 def _build_drone_point(stream_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     data = _parse_json(payload.get("data"))
     if not isinstance(data, dict):
@@ -107,6 +148,7 @@ def _build_drone_point(stream_id: str, payload: dict[str, Any]) -> dict[str, Any
     component_id = _to_int(payload.get("component_id"))
     alt = _normalize_millimeters(data.get("alt"))
     relative_alt = _normalize_millimeters(data.get("relative_alt"))
+    va = _to_float(data.get("va"))
 
     return {
         "stream_id": stream_id,
@@ -117,6 +159,7 @@ def _build_drone_point(stream_id: str, payload: dict[str, Any]) -> dict[str, Any
         "lon": lon,
         "alt": alt,
         "relative_alt": relative_alt,
+        "va": va,
         "position": [lat, lon],
         "heading": _to_float(data.get("hdg")),
         "time_boot_ms": _to_int(data.get("time_boot_ms")),
@@ -188,6 +231,7 @@ def _get_cached_drone_paths(*, system_id: int | None, point_limit: int) -> list[
             "drone_id": str(drone_id),
             "system_id": _to_int(latest.get("system_id")),
             "component_id": _to_int(latest.get("component_id")),
+            **_get_drone_status(drone_id),
             "path": path,
         }
 
@@ -243,6 +287,7 @@ def _get_drone_paths(
                 "drone_id": drone_key,
                 "system_id": point["system_id"],
                 "component_id": point["component_id"],
+                **_get_drone_status(drone_key),
                 "path": [],
             },
         )

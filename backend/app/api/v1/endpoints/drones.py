@@ -40,6 +40,31 @@ def _to_float(value):
     return float(value) if value is not None else None
 
 
+def _to_int(value):
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_bool(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def _serialize_datetime(value):
     return value.isoformat() if value is not None else None
 
@@ -63,6 +88,24 @@ def _parse_json(value):
         except json.JSONDecodeError:
             return value
     return value
+
+
+def _latest_drone_status(drone_id: str) -> dict:
+    if not runtime.redis_client:
+        return {}
+
+    status = runtime.redis_client.hgetall(_drone_status_key(drone_id))
+    if not status:
+        return {}
+
+    return {
+        "vehicle_status": status.get("vehicle_status") or None,
+        "armed": _to_bool(status.get("armed")),
+        "flight_enable": _to_bool(status.get("flight_enable")),
+        "system_status": _to_int(status.get("system_status")),
+        "system_status_name": status.get("system_status_name") or None,
+        "status_seen_at": status.get("last_seen_at") or None,
+    }
 
 
 def _sse_payload(event: str, data: dict) -> str:
@@ -311,9 +354,11 @@ def _latest_position_rows() -> list[dict]:
                 "lon": point.get("lon"),
                 "alt": point.get("alt"),
                 "relative_alt": point.get("relative_alt"),
+                "va": point.get("va"),
                 "heading": point.get("heading"),
                 "position": point.get("position"),
                 "stream_id": point.get("stream_id"),
+                **_latest_drone_status(str(drone_id)),
             }
         )
     return items

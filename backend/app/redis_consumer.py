@@ -17,6 +17,7 @@ from app.realtime import drone_position_hub
 
 DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
 DRONE_PATH_KEY_PREFIX = os.getenv("DRONE_PATH_KEY_PREFIX", "drone:path")
+DRONE_STATUS_KEY_PREFIX = os.getenv("DRONE_STATUS_KEY_PREFIX", "drone:status")
 DRONE_PATH_MAX_POINTS = int(os.getenv("DRONE_PATH_MAX_POINTS", "1000"))
 DRONE_PATH_TTL_SEC = int(os.getenv("DRONE_PATH_TTL_SEC", "86400"))
 DRONE_TELEMETRY_DB_ENABLED = os.getenv("DRONE_TELEMETRY_DB_ENABLED", "true").lower() not in {
@@ -42,6 +43,22 @@ def _to_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_bool(value: Any) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _normalize_coordinate(value: Any, *, max_abs: float, scale: float = 1e7) -> float | None:
@@ -167,6 +184,23 @@ class RedisStreamConsumer:
     def _drone_path_key(self, system_id: int | str) -> str:
         return f"{DRONE_PATH_KEY_PREFIX}:{system_id}"
 
+    def _drone_status_key(self, system_id: int | str) -> str:
+        return f"{DRONE_STATUS_KEY_PREFIX}:{system_id}"
+
+    def _latest_drone_status(self, system_id: int | str) -> dict[str, Any]:
+        status = self.redis_client.hgetall(self._drone_status_key(system_id))
+        if not status:
+            return {}
+
+        return {
+            "vehicle_status": status.get("vehicle_status") or None,
+            "armed": _to_bool(status.get("armed")),
+            "flight_enable": _to_bool(status.get("flight_enable")),
+            "system_status": _to_int(status.get("system_status")),
+            "system_status_name": status.get("system_status_name") or None,
+            "status_seen_at": status.get("last_seen_at") or None,
+        }
+
     def _cache_drone_position(self, msg_id: str, payload: dict[str, Any]) -> None:
         if payload.get("message_type") != "GLOBAL_POSITION_INT":
             return
@@ -193,9 +227,11 @@ class RedisStreamConsumer:
             "lon": lon,
             "alt": _normalize_millimeters(data.get("alt")),
             "relative_alt": _normalize_millimeters(data.get("relative_alt")),
+            "va": _to_float(data.get("va")),
             "position": [lat, lon],
             "heading": _to_float(data.get("hdg")),
             "time_boot_ms": _to_int(data.get("time_boot_ms")),
+            **self._latest_drone_status(system_id),
         }
 
         key = self._drone_path_key(system_id)

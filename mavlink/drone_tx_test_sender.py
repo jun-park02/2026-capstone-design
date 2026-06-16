@@ -19,6 +19,10 @@ MOVEMENT_MODE = os.getenv("MOVEMENT_MODE", "linear").lower()
 LINEAR_STEP = float(os.getenv("LINEAR_STEP", "0.0001"))
 # linear 모드에서 패킷을 보낼 때마다 고도에 더하는 값(고도 증가량)
 ALT_STEP = float(os.getenv("ALT_STEP", "0.5"))
+# 고도에 주기적으로 더할 변화량. 0이면 고도를 흔들지 않음
+ALT_VARIATION_METERS = float(os.getenv("ALT_VARIATION_METERS", "0"))
+# 고도 변화가 한 주기를 도는 데 필요한 전송 횟수
+ALT_VARIATION_PERIOD_STEPS = max(1, int(os.getenv("ALT_VARIATION_PERIOD_STEPS", "120")))
 # circle 모드에서 원형 경로의 반지름
 CIRCLE_RADIUS_METERS = float(os.getenv("CIRCLE_RADIUS_METERS", "250"))
 # circle 모드에서 한 바퀴를 도는 데 필요한 전송 횟수
@@ -47,10 +51,20 @@ BASE_ALT = float(os.getenv("BASE_ALT", "50.0"))
 BASE_HEADING = float(os.getenv("BASE_HEADING", "166.97"))
 # 전송 payload에 넣을 상대속도 va 값
 BASE_VA = float(os.getenv("BASE_VA", "0.0"))
+# va에 주기적으로 더할 변화량. 0이면 va를 흔들지 않음
+VA_VARIATION = float(os.getenv("VA_VARIATION", "0"))
+# va 변화가 한 주기를 도는 데 필요한 전송 횟수
+VA_VARIATION_PERIOD_STEPS = max(1, int(os.getenv("VA_VARIATION_PERIOD_STEPS", "120")))
 # 전송 payload에 넣을 배터리 잔량 비율
 BATTERY_SOC = float(os.getenv("BATTERY_SOC", "0.9781"))
+# 패킷을 보낼 때마다 감소시킬 배터리 잔량 비율
+BATTERY_SOC_DROP_PER_STEP = float(os.getenv("BATTERY_SOC_DROP_PER_STEP", "0"))
+# 테스트 배터리 잔량이 내려갈 수 있는 최저 비율
+BATTERY_MIN_SOC = float(os.getenv("BATTERY_MIN_SOC", "0.2"))
 # 전송 payload에 넣을 배터리 전압
 BATTERY_VOLTAGE = float(os.getenv("BATTERY_VOLTAGE", "49.48"))
+# 배터리가 최저 비율까지 내려갔을 때 같이 낮출 전압 폭
+BATTERY_VOLTAGE_DROP = float(os.getenv("BATTERY_VOLTAGE_DROP", "0"))
 # 전송 payload에 넣을 드론 상태 값
 VEHICLE_STATUS = os.getenv("VEHICLE_STATUS", "MC_FLYING")
 # 위도 1도를 미터로 환산할 때 사용하는 근사값
@@ -76,6 +90,32 @@ def offset_position(
     return lat, lon
 
 
+def wave_value(seq: int, period_steps: int, *, phase: float = 0.0) -> float:
+    return math.sin((2 * math.pi * (seq % period_steps) / period_steps) + phase)
+
+
+def altitude_variation(seq: int) -> float:
+    return ALT_VARIATION_METERS * wave_value(seq, ALT_VARIATION_PERIOD_STEPS)
+
+
+def dynamic_va(seq: int) -> float:
+    return max(0.0, BASE_VA + (VA_VARIATION * wave_value(seq, VA_VARIATION_PERIOD_STEPS, phase=math.pi / 4)))
+
+
+def dynamic_battery_soc(seq: int) -> float:
+    min_soc = min(BATTERY_SOC, max(0.0, BATTERY_MIN_SOC))
+    return max(min_soc, BATTERY_SOC - (seq * BATTERY_SOC_DROP_PER_STEP))
+
+
+def dynamic_battery_voltage(soc: float) -> float:
+    if BATTERY_VOLTAGE_DROP <= 0:
+        return BATTERY_VOLTAGE
+
+    usable_soc = max(BATTERY_SOC - min(BATTERY_SOC, max(0.0, BATTERY_MIN_SOC)), 1e-9)
+    drain_ratio = min(max((BATTERY_SOC - soc) / usable_soc, 0.0), 1.0)
+    return BATTERY_VOLTAGE - (BATTERY_VOLTAGE_DROP * drain_ratio)
+
+
 def get_position(seq: int) -> tuple[float, float, float, float]:
     center_lat = BASE_LAT + POSITION_OFFSET
     center_lon = BASE_LON + POSITION_OFFSET
@@ -86,7 +126,7 @@ def get_position(seq: int) -> tuple[float, float, float, float]:
         )
         lat = center_lat + (math.cos(angle) * CIRCLE_RADIUS_METERS / METERS_PER_DEGREE_LAT)
         lon = center_lon + (math.sin(angle) * meters_to_lon_degrees(CIRCLE_RADIUS_METERS, center_lat))
-        alt = BASE_ALT + ALT_OFFSET
+        alt = BASE_ALT + ALT_OFFSET + altitude_variation(seq)
         heading = (math.degrees(angle) + 90) % 360
         return lat, lon, alt, heading
 
@@ -121,27 +161,29 @@ def get_position(seq: int) -> tuple[float, float, float, float]:
             north_meters=north_meters,
             east_meters=east_meters,
         )
-        alt = BASE_ALT + ALT_OFFSET
+        alt = BASE_ALT + ALT_OFFSET + altitude_variation(seq)
         return lat, lon, alt, heading
 
     lat = center_lat + (seq * LINEAR_STEP)
     lon = center_lon + (seq * LINEAR_STEP)
-    alt = BASE_ALT + ALT_OFFSET + (seq * ALT_STEP)
+    alt = BASE_ALT + ALT_OFFSET + (seq * ALT_STEP) + altitude_variation(seq)
     return lat, lon, alt, BASE_HEADING
 
 
 def build_payload(seq: int, started_at: float) -> dict:
     lat, lon, alt, heading = get_position(seq)
+    battery_soc = dynamic_battery_soc(seq)
+    battery_voltage = dynamic_battery_voltage(battery_soc)
     return {
         "drone_id": DRONE_ID,
         "simtime": round(time.monotonic() - started_at, 3),
         "lla": [round(lat, 8), round(lon, 8), round(alt, 2)],
         "relative_altitude": round(alt - BASE_ALT, 2),
-        "va": BASE_VA,
+        "va": round(dynamic_va(seq), 2),
         "heading": round(heading, 2),
         "battery": {
-            "soc": BATTERY_SOC,
-            "voltage": BATTERY_VOLTAGE,
+            "soc": round(battery_soc, 4),
+            "voltage": round(battery_voltage, 2),
         },
         "vehicle_status": VEHICLE_STATUS,
     }
@@ -173,6 +215,10 @@ def main():
         print(
             f"[{CONTAINER_NAME}] seq={seq}, target={TARGET_IP}:{TARGET_PORT}, "
             f"lat={lat:.6f}, lon={lon:.6f}, alt={alt:.1f}m, "
+            f"relative_alt={payload['relative_altitude']:.1f}m, "
+            f"va={payload['va']:.1f}m/s, "
+            f"battery={payload['battery']['soc'] * 100:.1f}%, "
+            f"voltage={payload['battery']['voltage']:.2f}V, "
             f"heading={payload['heading']:.1f}, "
             f"status={payload['vehicle_status']}"
         )
