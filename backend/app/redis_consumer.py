@@ -12,6 +12,7 @@ from sqlalchemy import insert
 
 from app.db import SessionLocal
 from app.models import DroneTelemetry
+from app.realtime import drone_position_hub
 
 
 DRONE_PATH_IDS_KEY = os.getenv("DRONE_PATH_IDS_KEY", "drone:path:ids")
@@ -182,8 +183,10 @@ class RedisStreamConsumer:
 
         component_id = _to_int(payload.get("component_id"))
         point = {
+            "drone_id": str(system_id),
             "stream_id": msg_id,
             "timestamp": payload.get("timestamp"),
+            "telemetry_at": payload.get("timestamp"),
             "system_id": system_id,
             "component_id": component_id,
             "lat": lat,
@@ -203,6 +206,7 @@ class RedisStreamConsumer:
         pipe.expire(key, DRONE_PATH_TTL_SEC)
         pipe.expire(DRONE_PATH_IDS_KEY, DRONE_PATH_TTL_SEC)
         pipe.execute()
+        drone_position_hub.publish(point)
 
     def _build_telemetry_row(self, msg_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         normalized_payload = dict(payload)

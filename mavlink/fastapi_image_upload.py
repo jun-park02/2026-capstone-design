@@ -18,6 +18,7 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 # 업로드 완료 이벤트를 발행할 Redis Stream 키
 STREAM_KEY = os.getenv("STREAM_KEY", "fire_detect")
+HEATMAP_STREAM_KEY = os.getenv("HEATMAP_STREAM_KEY", "heatmap")
 # 업로드된 RGB 이미지를 저장할 컨테이너 내부 경로
 IMAGE_SAVE_DIR = os.getenv("IMG_SAVE_DIR", "/app/images")
 # 업로드된 IR 이미지를 저장할 컨테이너 내부 경로
@@ -172,11 +173,11 @@ def require_redis_client() -> redis.Redis:
     return redis_client
 
 
-def publish_completed_event(payload: dict[str, Any]) -> str:
+def publish_completed_event(payload: dict[str, Any], stream_key: str = STREAM_KEY) -> str:
     client = require_redis_client()
     try:
         msg_id = client.xadd(
-            STREAM_KEY,
+            stream_key,
             {"payload": json.dumps(payload, ensure_ascii=False)},
             maxlen=10000,
             approximate=True,
@@ -186,7 +187,9 @@ def publish_completed_event(payload: dict[str, Any]) -> str:
 
     print(
         "[FIRE-DETECT-UPLOAD] Redis event published: "
-        f"id={msg_id} event_id={payload['event_id']} image={payload['image_name']}"
+        f"stream={stream_key} id={msg_id} "
+        f"event_id={payload.get('event_id') or payload.get('heatmap_id')} "
+        f"image={payload.get('image_name') or payload.get('image_count')}"
     )
     return str(msg_id)
 
@@ -204,7 +207,9 @@ def health():
         "ok": True,
         "redis_connected": redis_ok,
         "stream_key": STREAM_KEY,
+        "heatmap_stream_key": HEATMAP_STREAM_KEY,
         "image_save_dir": IMAGE_SAVE_DIR,
+        "heatmap_image_save_dir": HEATMAP_IMAGE_SAVE_DIR,
         "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
 
@@ -235,6 +240,10 @@ async def upload_heatmap_image(
     lon = data.get("lon")
     radius_km = data.get("radius_km")
     num_times = data.get("num_times")
+    opacity = data.get("opacity", 0.35)
+
+    if any(value is None or value == "" for value in (x_min, x_max, y_min, y_max)):
+        raise HTTPException(status_code=400, detail="x_min, x_max, y_min, y_max are required")
 
     print(data)
 
@@ -273,20 +282,51 @@ async def upload_heatmap_image(
                 "image_size_bytes": image_size_bytes,
                 "original_filename": upload.filename,
                 "content_type": upload.content_type,
+                "prediction_minutes": (frame_index + 1) * 10,
+                "label": f"{(frame_index + 1) * 10}분 뒤 확산 예측 히트맵",
             }
         )
 
     client_host = request.client.host if request.client else None
+    coordinates = {
+        "bottom_left": {"x": x_min, "y": y_min},
+        "top_right": {"x": x_max, "y": y_max},
+    }
+    payload = {
+        "event_type": "heatmap_uploaded",
+        "received_at": now_str(),
+        "heatmap_id": heatmap_id,
+        "image_count": len(saved_images),
+        "frames": saved_images,
+        "coordinates": coordinates,
+        "opacity": opacity,
+        "src_ip": client_host,
+        "metadata": {
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "lat": lat,
+            "lon": lon,
+            "radius_km": radius_km,
+            "num_times": num_times,
+        },
+    }
+    msg_id = publish_completed_event(payload, HEATMAP_STREAM_KEY)
     print(
         "[HEATMAP-UPLOAD] images saved: "
-        f"heatmap_id={heatmap_id} count={len(saved_images)}"
+        f"heatmap_id={heatmap_id} count={len(saved_images)} stream_id={msg_id}"
     )
 
     return {
         "ok": True,
+        "id": msg_id,
+        "stream_key": HEATMAP_STREAM_KEY,
         "heatmap_id": heatmap_id,
         "image_count": len(saved_images),
         "images": saved_images,
+        "coordinates": coordinates,
+        "opacity": opacity,
         "src_ip": client_host,
         "metadata": {
             "x_min": x_min,

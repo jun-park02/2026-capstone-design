@@ -17,6 +17,9 @@ services:
       - MYSQL_USER=user
       - MYSQL_PASSWORD=password
       - RAW_IMAGE_DIR=/app/images
+      - HEATMAP_IMAGE_DIR=/app/images/heatmaps
+      - HEATMAP_STREAM_KEY=heatmap
+      - HEATMAP_OVERLAY_OPACITY=0.35
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=ap-northeast-2
@@ -56,7 +59,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - STREAM_KEY=drone_telemetry
-      - JSON_SAMPLE_INTERVAL_SEC=2
+      - JSON_SAMPLE_INTERVAL_SEC=0.2
       - SIMTIME_UNIT=seconds
       - DEFAULT_DRONE_ID=1
     command: python drone_telemetry_rx.py
@@ -146,7 +149,9 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - STREAM_KEY=fire_detect
+      - HEATMAP_STREAM_KEY=heatmap
       - IMG_SAVE_DIR=/app/images
+      - HEATMAP_IMG_SAVE_DIR=/app/images/heatmaps
       - MAX_UPLOAD_BYTES=20971520
     command: python fastapi_image_upload.py
     volumes:

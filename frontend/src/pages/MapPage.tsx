@@ -7,9 +7,10 @@ import { API_BASE_URL, USE_MOCK_DATA, apiClient } from '../api/config';
 
 const DRONE_FOCUS_ZOOM = 16;
 const OVERVIEW_REFRESH_MS = 30000;
-const SSE_REFRESH_SEC = 2;
+const BATTERY_SSE_REFRESH_SEC = 0.5;
 const MAX_LIVE_PATH_POINTS = 500;
 const DEFAULT_HEATMAP_OPACITY = 0.35;
+const HEATMAP_FRAME_INTERVAL_MS = 1000;
 
 const fireIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
@@ -98,20 +99,48 @@ interface HeatmapCorner {
   lat?: number | string | null;
   lon?: number | string | null;
   lng?: number | string | null;
+  x?: number | string | null;
+  y?: number | string | null;
+}
+
+interface HeatmapCoordinatesPayload {
+  bottom_left?: HeatmapCorner | [number | string, number | string] | null;
+  bottomLeft?: HeatmapCorner | [number | string, number | string] | null;
+  top_right?: HeatmapCorner | [number | string, number | string] | null;
+  topRight?: HeatmapCorner | [number | string, number | string] | null;
+}
+
+interface HeatmapFramePayload {
+  frame_index?: number | string | null;
+  image_url?: string | null;
+  imageUrl?: string | null;
+  prediction_minutes?: number | string | null;
+  label?: string | null;
 }
 
 interface HeatmapOverlayPayload {
   ok?: boolean;
   image_url?: string | null;
   imageUrl?: string | null;
+  frames?: HeatmapFramePayload[];
+  coordinates?: HeatmapCoordinatesPayload | [unknown, unknown] | null;
   top_left?: HeatmapCorner | null;
   bottom_right?: HeatmapCorner | null;
   opacity?: number | string | null;
+  heatmap_id?: string | number | null;
+}
+
+interface HeatmapFrameState {
+  frameIndex: number;
+  imageUrl: string;
+  predictionMinutes: number;
+  label: string;
 }
 
 interface HeatmapOverlayState {
-  imageUrl: string;
-  bounds: [Coordinate, Coordinate];
+  heatmapId: string | null;
+  frames: HeatmapFrameState[];
+  coordinates: [Coordinate, Coordinate];
   opacity: number;
 }
 
@@ -248,14 +277,56 @@ const coordinateFromStreamItem = (item: DronePositionStreamItem): Coordinate | n
   })()
 );
 
-const coordinateFromHeatmapCorner = (corner?: HeatmapCorner | null): Coordinate | null => {
-  if (!corner) {
+const coordinateFromHeatmapPoint = (
+  point?: HeatmapCorner | [number | string, number | string] | null,
+): Coordinate | null => {
+  if (!point) {
     return null;
   }
 
-  const lat = toNumber(corner.lat);
-  const lng = toNumber(corner.lon ?? corner.lng);
+  if (Array.isArray(point)) {
+    const lng = toNumber(point[0]);
+    const lat = toNumber(point[1]);
+    return lat === null || lng === null ? null : [lat, lng];
+  }
+
+  const lat = toNumber(point.lat ?? point.y);
+  const lng = toNumber(point.lon ?? point.lng ?? point.x);
   return lat === null || lng === null ? null : [lat, lng];
+};
+
+const coordinatesFromHeatmapPayload = (payload: HeatmapOverlayPayload): [Coordinate, Coordinate] | null => {
+  const coordinates = payload.coordinates;
+  let bottomLeft: Coordinate | null = null;
+  let topRight: Coordinate | null = null;
+
+  if (Array.isArray(coordinates) && coordinates.length >= 2) {
+    bottomLeft = toCoordinate(coordinates[0]);
+    topRight = toCoordinate(coordinates[1]);
+  } else if (coordinates && typeof coordinates === 'object') {
+    const coordinateObject = coordinates as HeatmapCoordinatesPayload;
+    bottomLeft = coordinateFromHeatmapPoint(coordinateObject.bottom_left ?? coordinateObject.bottomLeft);
+    topRight = coordinateFromHeatmapPoint(coordinateObject.top_right ?? coordinateObject.topRight);
+  }
+
+  if (!bottomLeft || !topRight) {
+    const topLeft = coordinateFromHeatmapPoint(payload.top_left);
+    const bottomRight = coordinateFromHeatmapPoint(payload.bottom_right);
+    if (topLeft && bottomRight) {
+      const north = Math.max(topLeft[0], bottomRight[0]);
+      const south = Math.min(topLeft[0], bottomRight[0]);
+      const east = Math.max(topLeft[1], bottomRight[1]);
+      const west = Math.min(topLeft[1], bottomRight[1]);
+      return [[south, west], [north, east]];
+    }
+    return null;
+  }
+
+  const north = Math.max(bottomLeft[0], topRight[0]);
+  const south = Math.min(bottomLeft[0], topRight[0]);
+  const east = Math.max(bottomLeft[1], topRight[1]);
+  const west = Math.min(bottomLeft[1], topRight[1]);
+  return [[south, west], [north, east]];
 };
 
 const clampOpacity = (value: unknown) => {
@@ -275,26 +346,62 @@ const resolveHeatmapImageUrl = (imageUrl: string) => {
   return apiUrl(imageUrl.startsWith('/') ? imageUrl : `/${imageUrl}`);
 };
 
+const normalizeHeatmapFrame = (
+  frame: HeatmapFramePayload,
+  fallbackIndex: number,
+): HeatmapFrameState | null => {
+  const imageUrl = frame.image_url ?? frame.imageUrl;
+  if (!imageUrl) {
+    return null;
+  }
+
+  const frameIndex = toNumber(frame.frame_index) ?? fallbackIndex;
+  const predictionMinutes = toNumber(frame.prediction_minutes) ?? (frameIndex + 1) * 10;
+  return {
+    frameIndex,
+    imageUrl: resolveHeatmapImageUrl(imageUrl),
+    predictionMinutes,
+    label: frame.label ?? `${predictionMinutes}분 뒤 확산 예측 히트맵`,
+  };
+};
+
 const normalizeHeatmapOverlay = (payload: HeatmapOverlayPayload): HeatmapOverlayState | null => {
   if (payload.ok === false) {
     return null;
   }
 
-  const imageUrl = payload.image_url ?? payload.imageUrl;
-  const topLeft = coordinateFromHeatmapCorner(payload.top_left);
-  const bottomRight = coordinateFromHeatmapCorner(payload.bottom_right);
-  if (!imageUrl || !topLeft || !bottomRight) {
+  const coordinates = coordinatesFromHeatmapPayload(payload);
+  if (!coordinates) {
     return null;
   }
 
-  const north = Math.max(topLeft[0], bottomRight[0]);
-  const south = Math.min(topLeft[0], bottomRight[0]);
-  const east = Math.max(topLeft[1], bottomRight[1]);
-  const west = Math.min(topLeft[1], bottomRight[1]);
+  const frames = (payload.frames ?? [])
+    .map(normalizeHeatmapFrame)
+    .filter((frame): frame is HeatmapFrameState => frame !== null)
+    .sort((a, b) => a.frameIndex - b.frameIndex);
+
+  if (frames.length === 0 && (payload.image_url || payload.imageUrl)) {
+    const singleFrame = normalizeHeatmapFrame(
+      {
+        frame_index: 0,
+        image_url: payload.image_url,
+        imageUrl: payload.imageUrl,
+      },
+      0,
+    );
+    if (singleFrame) {
+      frames.push(singleFrame);
+    }
+  }
+
+  if (frames.length === 0) {
+    return null;
+  }
 
   return {
-    imageUrl: resolveHeatmapImageUrl(imageUrl),
-    bounds: [[south, west], [north, east]],
+    heatmapId: payload.heatmap_id === null || payload.heatmap_id === undefined ? null : String(payload.heatmap_id),
+    frames,
+    coordinates,
     opacity: clampOpacity(payload.opacity),
   };
 };
@@ -421,6 +528,7 @@ export const MapPage: React.FC = () => {
   const [dronePaths, setDronePaths] = useState<DronePaths>(USE_MOCK_DATA ? mockDronePaths : {});
   const [fires, setFires] = useState<FireMarker[]>(USE_MOCK_DATA ? mockFires : []);
   const [heatmapOverlay, setHeatmapOverlay] = useState<HeatmapOverlayState | null>(null);
+  const [heatmapFrameIndex, setHeatmapFrameIndex] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -449,8 +557,8 @@ export const MapPage: React.FC = () => {
       }
     };
 
-    const positionSource = new EventSource(apiUrl(`/drones/position/stream?interval_sec=${SSE_REFRESH_SEC}`));
-    const batterySource = new EventSource(apiUrl(`/drones/battery/stream?interval_sec=${SSE_REFRESH_SEC}`));
+    const positionSource = new EventSource(apiUrl('/drones/position/stream'));
+    const batterySource = new EventSource(apiUrl(`/drones/battery/stream?interval_sec=${BATTERY_SSE_REFRESH_SEC}`));
     const heatmapSource = new EventSource(apiUrl('/heatmaps/stream'));
 
     positionSource.addEventListener('position', (event) => {
@@ -539,6 +647,7 @@ export const MapPage: React.FC = () => {
         const nextOverlay = normalizeHeatmapOverlay(payload);
         if (nextOverlay && isMounted) {
           setHeatmapOverlay(nextOverlay);
+          setHeatmapFrameIndex(0);
         }
       } catch (error) {
         console.error('Failed to parse heatmap SSE:', error);
@@ -578,9 +687,30 @@ export const MapPage: React.FC = () => {
       [],
     );
     const firePoints = fires.map((fire) => [fire.lat, fire.lng] as Coordinate);
-    const heatmapPoints = heatmapOverlay ? heatmapOverlay.bounds : [];
+    const heatmapPoints = heatmapOverlay ? heatmapOverlay.coordinates : [];
     return [...pathPoints, ...firePoints, ...heatmapPoints];
   }, [dronePaths, fires, heatmapOverlay]);
+  useEffect(() => {
+    if (!heatmapOverlay || heatmapOverlay.frames.length <= 1) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setHeatmapFrameIndex((currentFrameIndex) => (
+        (currentFrameIndex + 1) % heatmapOverlay.frames.length
+      ));
+    }, HEATMAP_FRAME_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [heatmapOverlay?.heatmapId, heatmapOverlay?.frames.length]);
+
+  const currentHeatmapFrame = useMemo(() => {
+    if (!heatmapOverlay || heatmapOverlay.frames.length === 0) {
+      return null;
+    }
+
+    return heatmapOverlay.frames[heatmapFrameIndex % heatmapOverlay.frames.length];
+  }, [heatmapFrameIndex, heatmapOverlay]);
   const selectedDrone = useMemo(
     () => drones.find((drone) => drone.id === activeDrone) ?? null,
     [activeDrone, drones],
@@ -655,10 +785,10 @@ export const MapPage: React.FC = () => {
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
             />
-            {heatmapOverlay && (
+            {heatmapOverlay && currentHeatmapFrame && (
               <ImageOverlay
-                url={heatmapOverlay.imageUrl}
-                bounds={heatmapOverlay.bounds}
+                url={currentHeatmapFrame.imageUrl}
+                bounds={heatmapOverlay.coordinates}
                 opacity={heatmapOverlay.opacity}
                 zIndex={300}
               />
@@ -719,6 +849,11 @@ export const MapPage: React.FC = () => {
               </Marker>
             ))}
           </MapContainer>
+          {heatmapOverlay && currentHeatmapFrame && (
+            <div className="pointer-events-none absolute left-4 bottom-4 z-[500] rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-sm font-medium text-slate-800 shadow-sm">
+              {currentHeatmapFrame.label}
+            </div>
+          )}
         </Card>
       </div>
     </div>

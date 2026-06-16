@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app import runtime
 from app.db import SessionLocal, get_db_session
 from app.models import DroneTelemetry
+from app.realtime import drone_position_hub
 
 
 router = APIRouter(tags=["drones"])
@@ -343,20 +344,40 @@ async def stream_drone_battery(
 @router2.get("/drones/position/stream")
 async def stream_drone_position(
     request: Request,
-    interval_sec: float = Query(2.0, ge=0.5, le=60),
+    heartbeat_sec: float = Query(15.0, ge=1, le=60),
 ):
     """Stream latest drone positions as Server-Sent Events."""
 
     async def event_generator():
-        while not await request.is_disconnected():
+        snapshot = _latest_position_rows()
+        if snapshot:
             yield _sse_payload(
                 "position",
                 {
                     "ok": True,
-                    "items": _latest_position_rows(),
+                    "items": snapshot,
                     "emitted_at": datetime.now(UTC).isoformat(),
                 },
             )
-            await asyncio.sleep(interval_sec)
+
+        queue = drone_position_hub.subscribe()
+        try:
+            while not await request.is_disconnected():
+                try:
+                    point = await asyncio.wait_for(queue.get(), timeout=heartbeat_sec)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+
+                yield _sse_payload(
+                    "position",
+                    {
+                        "ok": True,
+                        "items": [point],
+                        "emitted_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+        finally:
+            drone_position_hub.unsubscribe(queue)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

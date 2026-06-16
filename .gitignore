@@ -10,3 +10,4 @@ backend/alembic/versions/__pycache__/
 __init__.py
 __pycache__/
 mavlink/images/
+package-lock.json
