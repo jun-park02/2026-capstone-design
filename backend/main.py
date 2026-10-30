@@ -1,10 +1,8 @@
 import os
 from contextlib import asynccontextmanager
-
 import redis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from app import runtime
 from app.api.v1.routers import router as api_v1_router
 from app.fire_detect_listener import FireDetectListener
