@@ -18,10 +18,10 @@ origins = [
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    FastAPI 애플리케이션h의 생명주기 동안 필요한 백그라운드 리소스를 초기화하고 정리하는 함수.
+    FastAPI의 생명주기동안 필요한 백그라운드 리소스를 초기화하고 정리하는 함수
 
-    서버 시작 시 Redis 스트림 컨슈머와 화재 감지 리스너를 시작하고,
-    서버 종료 시 관련 리소스를 순서대로 종료한다.
+    서버 시작 시 Redis 스트림 컨슈머와 화재 감지 리스너를 시작
+    서버 종료 시 관련 리소스를 순서대로 종료
     """
     # 드론 텔레메트리 Redis Stream을 소비하는 백그라운드 컨슈머를 시작한다.
     runtime.consumer = RedisStreamConsumer(
