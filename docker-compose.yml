@@ -39,6 +39,12 @@ services:
       - GMAIL_USE_TLS=${GMAIL_USE_TLS}
       - FIRE_CONFIRM_BASE_URL=${FIRE_CONFIRM_BASE_URL}
       - APP_BASE_URL=${APP_BASE_URL}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DRONE_STREAM_KEY=drone_telemetry
+      - FIRE_STREAM_KEY=fire_detect
+      - CONSUMER_GROUP=mygroup
+      - FIRE_DETECT_BLOCK_MS=5000
     volumes:
       - ./mavlink/images:/app/images
     networks:

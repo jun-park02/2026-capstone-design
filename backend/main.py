@@ -23,20 +23,35 @@ async def lifespan(app: FastAPI):
     서버 시작 시 Redis 스트림 컨슈머와 화재 감지 리스너를 시작
     서버 종료 시 관련 리소스를 순서대로 종료
     """
+    # 환경 변수 로드 및 Nnoe 검증
+    envs = {
+        "redis_host": os.getenv("REDIS_HOST"),
+        "redis_port": os.getenv("REDIS_PORT"),
+        "drone_stream_key": os.getenv("DRONE_STREAM_KEY"),
+        "fire_stream_key": os.getenv("FIRE_STREAM_KEY"),
+        "group": os.getenv("CONSUMER_GROUP"),
+        "block_ms": os.getenv("FIRE_DETECT_BLOCK_MS"),
+    }
+
+    for key, value in envs.items():
+        if value is None:
+            raise RuntimeError(f"Required environment variable is None: {key}")
+
+    
     # 드론 텔레메트리 Redis Stream을 소비하는 백그라운드 컨슈머를 시작한다.
     runtime.consumer = RedisStreamConsumer(
-        redis_host=os.getenv("REDIS_HOST", "redis"),
-        redis_port=int(os.getenv("REDIS_PORT", "6379")),
-        stream_key=os.getenv("STREAM_KEY", "drone_telemetry"),
-        group=os.getenv("CONSUMER_GROUP", "mygroup"),
+        redis_host=envs["redis_host"],
+        redis_port=int(envs["redis_port"]),
+        stream_key=envs["drone_stream_key"],
+        group=envs["group"],
         consumer=None,
     )
     await runtime.consumer.start()
 
     # 앱 전역에서 사용할 Redis 클라이언트를 초기화한다.
     runtime.redis_client = redis.Redis(
-        host=os.getenv("REDIS_HOST", "redis"),
-        port=int(os.getenv("REDIS_PORT", "6379")),
+        host=envs["redis_host"],
+        port=int(envs["redis_port"]),
         db=0,
         decode_responses=True,
     )
@@ -45,8 +60,8 @@ async def lifespan(app: FastAPI):
     runtime.fire_listener = FireDetectListener(
         redis_client=runtime.redis_client,
         raw_image_dir=runtime.RAW_IMAGE_DIR,
-        stream_key=os.getenv("RAW_STREAM_KEY", "fire_detect"),
-        block_ms=int(os.getenv("FIRE_DETECT_BLOCK_MS", "5000")),
+        stream_key=envs["fire_stream_key"],
+        block_ms=int(envs["block_ms"]),
     )
     await runtime.fire_listener.start()
 
