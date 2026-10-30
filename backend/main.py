@@ -11,18 +11,16 @@ from app.fire_detect_listener import FireDetectListener
 from app.redis_consumer import RedisStreamConsumer
 
 
-def get_cors_origins() -> list[str]:
-    origins = os.getenv(
-        "CORS_ALLOW_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
-    )
-    return [origin.strip() for origin in origins.split(",") if origin.strip()]
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
+]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    FastAPI 애플리케이션의 생명주기 동안 필요한 백그라운드 리소스를 초기화하고 정리하는 함수.
+    FastAPI 애플리케이션h의 생명주기 동안 필요한 백그라운드 리소스를 초기화하고 정리하는 함수.
 
     서버 시작 시 Redis 스트림 컨슈머와 화재 감지 리스너를 시작하고,
     서버 종료 시 관련 리소스를 순서대로 종료한다.
@@ -67,10 +65,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_cors_origins(),
+    allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 app.include_router(api_v1_router)
