@@ -320,10 +320,12 @@ async def upload_heatmap_image(
         f"heatmap_id={heatmap_id} count={len(saved_images)} stream_id={msg_id}"
     )
 
-    while True:
-        cnt = 0
+    for saved_image in saved_images:
+        image_path = saved_image["image_path"]
+        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
 
-        img = cv2.imread(f'./heatmap-{heatmap_id}_frame_00{cnt}.png')
+        if img is None:
+            raise HTTPException(status_code=400, detail=f"failed to read {saved_image['field_name']}")
 
         if len(img.shape) == 3 and img.shape[2] == 4:
             # 이미 알파 채널(4채널)이 있는 PNG라면 그대로 사용
@@ -343,10 +345,7 @@ async def upload_heatmap_image(
         rgba[black_pixels] = [0, 0, 0, 0]
 
         # 5. 결과 저장
-        cv2.imwrite(f"./heatmap-{heatmap_id}_frame_00{cnt}.png", rgba)
-
-        if cnt == 5:
-            break
+        cv2.imwrite(image_path, rgba)
 
     return {
         "ok": True,
