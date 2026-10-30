@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(f"Required environment variable is None: {key}")
 
     
-    # 드론 텔레메트리 Redis Stream을 소비하는 백그라운드 컨슈머를 시작한다.
+    # 백그라운드 컨슈머(drone redis stream) 시작
     runtime.consumer = RedisStreamConsumer(
         redis_host=envs["redis_host"],
         redis_port=int(envs["redis_port"]),
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     )
     await runtime.consumer.start()
 
-    # 앱 전역에서 사용할 Redis 클라이언트를 초기화한다.
+    # redis 클라이언트(앱 전역에서 사용) 초기화
     runtime.redis_client = redis.Redis(
         host=envs["redis_host"],
         port=int(envs["redis_port"]),
@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
         decode_responses=True,
     )
 
-    # 화재 감지 스트림을 실시간으로 감시하는 리스너를 생성하고 시작한다.
+    # fire redis stream 리스너를 생성 및 시작
     runtime.fire_listener = FireDetectListener(
         redis_client=runtime.redis_client,
         raw_image_dir=runtime.RAW_IMAGE_DIR,
@@ -65,10 +65,9 @@ async def lifespan(app: FastAPI):
     )
     await runtime.fire_listener.start()
 
-    # 여기서부터 앱이 실제 요청을 처리한다.
     yield
 
-    # 서버 종료 시 시작했던 리소스를 정리한다.
+    # 서버 종료 시 시작했던 리소스 정리
     if runtime.fire_listener:
         await runtime.fire_listener.stop()
     if runtime.consumer:
