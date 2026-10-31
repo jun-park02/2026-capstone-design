@@ -1079,7 +1079,8 @@ export const MapPage: React.FC = () => {
             <DroneFocus drone={selectedDrone} />
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-              url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+              url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+              maxZoom={19}
             />
             {heatmapOverlay && currentHeatmapFrame && (
               <ImageOverlay
