@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from backend.app import app_state
+from app import app_state
 
 
 router = APIRouter(tags=["system"])

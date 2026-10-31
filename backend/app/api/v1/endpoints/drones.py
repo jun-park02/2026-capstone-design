@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app import app_state
+from app import app_state
 from app.db import SessionLocal, get_db_session
 from app.models import DroneTelemetry
 from app.realtime import drone_position_hub

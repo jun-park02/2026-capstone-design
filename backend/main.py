@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import redis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.app import app_state
+from app import app_state
 from app.api.v1.routers import router as api_v1_router
 from app.fire_detect_listener import FireDetectListener
 from app.redis_consumer import RedisStreamConsumer

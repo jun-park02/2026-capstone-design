@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend.app import app_state
+from app import app_state
 from app.db import get_db_session
 from app.models import DashboardAggregate, DroneTelemetry, FireEvent, FireEventEmailNotification
 

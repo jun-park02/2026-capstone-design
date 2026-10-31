@@ -9,7 +9,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from backend.app import app_state
+from app import app_state
 
 
 router = APIRouter(tags=["heatmaps"])

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app import app_state
+from app import app_state
 from app.api.v1.helpers import serialize_confirmation_meta
 from app.db import get_db_session
 from app.models import FireEvent

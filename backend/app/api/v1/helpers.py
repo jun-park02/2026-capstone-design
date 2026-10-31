@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi.responses import HTMLResponse
 
-from backend.app import app_state
+from app import app_state
 from app.models import FireEvent
 
 
