@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi.responses import HTMLResponse
 
-from app import runtime
+from backend.app import app_state
 from app.models import FireEvent
 
 
@@ -73,15 +73,15 @@ def render_confirmation_page(
 
 def sync_cached_confirmation(event: FireEvent) -> None:
     """최신 화재 이벤트 캐시에 사용자 확인 결과를 반영한다."""
-    if not runtime.fire_listener or not runtime.fire_listener.last_event:
+    if not app_state.fire_listener or not app_state.fire_listener.last_event:
         return
-    if runtime.fire_listener.last_event_id != event.redis_stream_id:
+    if app_state.fire_listener.last_event_id != event.redis_stream_id:
         return
 
-    data = runtime.fire_listener.last_event.get("data")
+    data = app_state.fire_listener.last_event.get("data")
     if not isinstance(data, dict):
         return
 
     updated_data = dict(data)
     updated_data.update(serialize_confirmation_meta(event))
-    runtime.fire_listener.last_event["data"] = updated_data
+    app_state.fire_listener.last_event["data"] = updated_data

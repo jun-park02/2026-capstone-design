@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app import runtime
+from backend.app import app_state
 
 
 router = APIRouter(tags=["system"])
@@ -34,8 +34,8 @@ def health():
     """백엔드와 백그라운드 리스너의 현재 동작 상태를 반환한다."""
     return {
         "status": "healthy",
-        "consumer_running": runtime.consumer.is_running if runtime.consumer else False,
-        "consumer_name": runtime.consumer.consumer if runtime.consumer else None,
-        "fire_listener_running": runtime.fire_listener.is_running if runtime.fire_listener else False,
-        "last_fire_event_id": runtime.fire_listener.last_event_id if runtime.fire_listener else None,
+        "consumer_running": app_state.consumer.is_running if app_state.consumer else False,
+        "consumer_name": app_state.consumer.consumer if app_state.consumer else None,
+        "fire_listener_running": app_state.fire_listener.is_running if app_state.fire_listener else False,
+        "last_fire_event_id": app_state.fire_listener.last_event_id if app_state.fire_listener else None,
     }

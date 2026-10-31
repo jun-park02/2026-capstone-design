@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import redis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app import runtime
+from backend.app import app_state
 from app.api.v1.routers import router as api_v1_router
 from app.fire_detect_listener import FireDetectListener
 from app.redis_consumer import RedisStreamConsumer
@@ -39,17 +39,17 @@ async def lifespan(app: FastAPI):
 
     
     # 백그라운드 컨슈머(drone redis stream) 시작
-    runtime.consumer = RedisStreamConsumer(
+    app_state.consumer = RedisStreamConsumer(
         redis_host=envs["redis_host"],
         redis_port=int(envs["redis_port"]),
         stream_key=envs["drone_stream_key"],
         group=envs["group"],
         consumer=None,
     )
-    await runtime.consumer.start()
+    await app_state.consumer.start()
 
     # redis 클라이언트(앱 전역에서 사용) 초기화
-    runtime.redis_client = redis.Redis(
+    app_state.redis_client = redis.Redis(
         host=envs["redis_host"],
         port=int(envs["redis_port"]),
         db=0,
@@ -57,23 +57,23 @@ async def lifespan(app: FastAPI):
     )
 
     # fire redis stream 리스너를 생성 및 시작
-    runtime.fire_listener = FireDetectListener(
-        redis_client=runtime.redis_client,
-        raw_image_dir=runtime.RAW_IMAGE_DIR,
+    app_state.fire_listener = FireDetectListener(
+        redis_client=app_state.redis_client,
+        raw_image_dir=app_state.RAW_IMAGE_DIR,
         stream_key=envs["fire_stream_key"],
         block_ms=int(envs["block_ms"]),
     )
-    await runtime.fire_listener.start()
+    await app_state.fire_listener.start()
 
     yield
 
     # 서버 종료 시 시작했던 리소스 정리
-    if runtime.fire_listener:
-        await runtime.fire_listener.stop()
-    if runtime.consumer:
-        await runtime.consumer.stop()
-    if runtime.redis_client:
-        runtime.redis_client.close()
+    if app_state.fire_listener:
+        await app_state.fire_listener.stop()
+    if app_state.consumer:
+        await app_state.consumer.stop()
+    if app_state.redis_client:
+        app_state.redis_client.close()
 
 
 app = FastAPI(lifespan=lifespan)

@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import runtime
+from backend.app import app_state
 from app.db import SessionLocal, get_db_session
 from app.models import DroneTelemetry
 from app.realtime import drone_position_hub
@@ -91,10 +91,10 @@ def _parse_json(value):
 
 
 def _latest_drone_status(drone_id: str) -> dict:
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return {}
 
-    status = runtime.redis_client.hgetall(_drone_status_key(drone_id))
+    status = app_state.redis_client.hgetall(_drone_status_key(drone_id))
     if not status:
         return {}
 
@@ -141,12 +141,12 @@ def get_active_drone_count(
     - timeout_sec 이내에 HEARTBEAT가 수신된 드론
     - 최근 HEARTBEAT의 system_status 가 MAV_STATE_ACTIVE 인 드론
     """
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return {"ok": False, "message": "Redis client not initialized"}
 
     now_ts = time.time()
     threshold_ts = now_ts - timeout_sec
-    candidate_ids = runtime.redis_client.zrangebyscore(DRONE_LAST_SEEN_KEY, threshold_ts, "+inf")
+    candidate_ids = app_state.redis_client.zrangebyscore(DRONE_LAST_SEEN_KEY, threshold_ts, "+inf")
 
     if not candidate_ids:
         return {
@@ -157,7 +157,7 @@ def get_active_drone_count(
             "evaluated_at": datetime.now(UTC).isoformat(),
         }
 
-    pipe = runtime.redis_client.pipeline()
+    pipe = app_state.redis_client.pipeline()
     for drone_id in candidate_ids:
         pipe.hmget(_drone_status_key(drone_id), ["system_status", "last_seen_ts"])
     status_rows = pipe.execute()
@@ -332,13 +332,13 @@ def _latest_battery_rows(limit: int = 200) -> list[dict]:
 
 
 def _latest_position_rows() -> list[dict]:
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return []
 
-    drone_ids = sorted(runtime.redis_client.smembers(DRONE_PATH_IDS_KEY))
+    drone_ids = sorted(app_state.redis_client.smembers(DRONE_PATH_IDS_KEY))
     items = []
     for drone_id in drone_ids:
-        entries = runtime.redis_client.lrange(_drone_path_key(drone_id), -1, -1)
+        entries = app_state.redis_client.lrange(_drone_path_key(drone_id), -1, -1)
         if not entries:
             continue
         point = _parse_json(entries[0])

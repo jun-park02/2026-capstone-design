@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import runtime
+from backend.app import app_state
 from app.db import get_db_session
 from app.models import DroneTelemetry, FireEvent
 
@@ -125,9 +125,9 @@ def _format_drone_status(status: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _get_drone_status(drone_id: int | str) -> dict[str, Any]:
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return {}
-    return _format_drone_status(runtime.redis_client.hgetall(_drone_status_key(drone_id)))
+    return _format_drone_status(app_state.redis_client.hgetall(_drone_status_key(drone_id)))
 
 
 def _build_drone_point(stream_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -196,17 +196,17 @@ def _format_drone_paths(paths_by_drone: dict[str, dict[str, Any]]) -> list[dict[
 
 
 def _get_cached_drone_paths(*, system_id: int | None, point_limit: int) -> list[dict[str, Any]]:
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return []
 
     if system_id is not None:
         drone_ids = [str(system_id)]
     else:
-        drone_ids = sorted(runtime.redis_client.smembers(DRONE_PATH_IDS_KEY), key=_drone_sort_key)
+        drone_ids = sorted(app_state.redis_client.smembers(DRONE_PATH_IDS_KEY), key=_drone_sort_key)
 
     paths_by_drone: dict[str, dict[str, Any]] = {}
     for drone_id in drone_ids:
-        entries = runtime.redis_client.lrange(_drone_path_key(drone_id), -point_limit, -1)
+        entries = app_state.redis_client.lrange(_drone_path_key(drone_id), -point_limit, -1)
         path: list[dict[str, Any]] = []
         for entry in entries:
             point = _parse_json(entry)
@@ -245,7 +245,7 @@ def _get_drone_paths(
     point_limit: int,
     stream_key: str,
 ) -> dict[str, Any]:
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return {
             "redis_available": False,
             "stream_key": stream_key,
@@ -264,7 +264,7 @@ def _get_drone_paths(
                 "drones": cached_drones,
             }
 
-    entries = runtime.redis_client.xrevrange(stream_key, count=message_limit)
+    entries = app_state.redis_client.xrevrange(stream_key, count=message_limit)
     entries.reverse()
 
     paths_by_drone: dict[str, dict[str, Any]] = {}

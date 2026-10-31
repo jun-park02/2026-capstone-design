@@ -9,7 +9,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app import runtime
+from backend.app import app_state
 
 
 router = APIRouter(tags=["heatmaps"])
@@ -178,12 +178,12 @@ async def stream_heatmaps(
     replay_latest: bool = Query(True),
 ):
     async def event_generator():
-        if not runtime.redis_client:
+        if not app_state.redis_client:
             yield _sse_payload("heatmap", {"ok": False, "message": "Redis client not initialized"})
             return
 
         last_id = "$"
-        latest_entries = runtime.redis_client.xrevrange(stream_key, count=1) if replay_latest else []
+        latest_entries = app_state.redis_client.xrevrange(stream_key, count=1) if replay_latest else []
         if latest_entries:
             latest_id, fields = latest_entries[0]
             payload = _payload_from_fields(fields)
@@ -198,7 +198,7 @@ async def stream_heatmaps(
         while not await request.is_disconnected():
             resp = await loop.run_in_executor(
                 None,
-                lambda: runtime.redis_client.xread(
+                lambda: app_state.redis_client.xread(
                     streams={stream_key: last_id},
                     count=1,
                     block=block_ms,

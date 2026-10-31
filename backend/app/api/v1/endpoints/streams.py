@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import runtime
+from backend.app import app_state
 from app.api.v1.helpers import serialize_confirmation_meta
 from app.db import get_db_session
 from app.models import FireEvent
@@ -17,11 +17,11 @@ router = APIRouter(tags=["streams"])
 @router.get("/mavlink/latest")
 def get_latest_mavlink_message():
     """Return the latest drone telemetry message from the Redis Stream."""
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return {"ok": False, "message": "Redis client not initialized"}
 
     stream_key = os.getenv("STREAM_KEY", "drone_telemetry")
-    entries = runtime.redis_client.xrevrange(stream_key, count=1)
+    entries = app_state.redis_client.xrevrange(stream_key, count=1)
     if not entries:
         return {"ok": True, "message": "No messages in stream", "data": None}
 
@@ -41,11 +41,11 @@ def get_latest_mavlink_message():
 @router.get("/raw/latest")
 def get_latest_raw_udp_message(session: Session = Depends(get_db_session)):
     """화재 이미지 스트림의 최신 이벤트를 Redis 기준으로 조회한다."""
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return {"ok": False, "message": "Redis client not initialized"}
 
     stream_key = os.getenv("RAW_STREAM_KEY", "fire_detect")
-    entries = runtime.redis_client.xrevrange(stream_key, count=1)
+    entries = app_state.redis_client.xrevrange(stream_key, count=1)
     if not entries:
         return {"ok": True, "message": "No messages in stream", "data": None}
 
@@ -57,9 +57,9 @@ def get_latest_raw_udp_message(session: Session = Depends(get_db_session)):
     if payload and payload.get("event_id"):
         event = session.scalar(select(FireEvent).where(FireEvent.event_id == str(payload["event_id"])))
 
-    if runtime.fire_listener and runtime.fire_listener.last_event_id == msg_id and runtime.fire_listener.last_event:
+    if app_state.fire_listener and app_state.fire_listener.last_event_id == msg_id and app_state.fire_listener.last_event:
         # 리스너가 이미 가공해 둔 최신 결과가 있으면 그 값을 우선 사용한다.
-        response = {"ok": True, **runtime.fire_listener.last_event}
+        response = {"ok": True, **app_state.fire_listener.last_event}
         data = response.get("data")
         if isinstance(data, dict) and event is not None:
             merged_data = dict(data)
@@ -84,10 +84,10 @@ def get_latest_raw_udp_message(session: Session = Depends(get_db_session)):
 @router.get("/raw/latest/live")
 def get_latest_raw_udp_message_live(session: Session = Depends(get_db_session)):
     """리스너 메모리 캐시에 있는 최신 화재 이벤트를 바로 반환한다."""
-    if not runtime.fire_listener or not runtime.fire_listener.last_event:
+    if not app_state.fire_listener or not app_state.fire_listener.last_event:
         return {"ok": True, "message": "No live fire event yet", "data": None}
 
-    response = {"ok": True, **runtime.fire_listener.last_event}
+    response = {"ok": True, **app_state.fire_listener.last_event}
     data = response.get("data")
     if isinstance(data, dict) and data.get("event_id"):
         event = session.scalar(select(FireEvent).where(FireEvent.event_id == str(data["event_id"])))

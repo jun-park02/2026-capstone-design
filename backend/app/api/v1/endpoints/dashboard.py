@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app import runtime
+from backend.app import app_state
 from app.db import get_db_session
 from app.models import DashboardAggregate, DroneTelemetry, FireEvent, FireEventEmailNotification
 
@@ -237,17 +237,17 @@ def _average_delay_seconds(session: Session, *, start_at: datetime, end_at: date
 
 
 def _active_drone_count(timeout_sec: int = DEFAULT_ACTIVE_TIMEOUT_SEC) -> int:
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return 0
 
     try:
         now_ts = time_module.time()
         threshold_ts = now_ts - timeout_sec
-        candidate_ids = runtime.redis_client.zrangebyscore(DRONE_LAST_SEEN_KEY, threshold_ts, "+inf")
+        candidate_ids = app_state.redis_client.zrangebyscore(DRONE_LAST_SEEN_KEY, threshold_ts, "+inf")
         if not candidate_ids:
             return 0
 
-        pipe = runtime.redis_client.pipeline()
+        pipe = app_state.redis_client.pipeline()
         for drone_id in candidate_ids:
             pipe.hmget(_drone_status_key(drone_id), ["system_status", "last_seen_ts"])
         status_rows = pipe.execute()
@@ -336,15 +336,15 @@ def _average_battery_percent(session: Session, *, recent_seconds: int = 15, limi
 
 
 def _cached_drone_paths(*, recent_seconds: int = 15, point_limit: int = 200) -> list[dict[str, Any]]:
-    if not runtime.redis_client:
+    if not app_state.redis_client:
         return []
 
     try:
         threshold_at = datetime.utcnow() - timedelta(seconds=recent_seconds)
-        drone_ids = sorted(runtime.redis_client.smembers(DRONE_PATH_IDS_KEY), key=_drone_sort_key)
+        drone_ids = sorted(app_state.redis_client.smembers(DRONE_PATH_IDS_KEY), key=_drone_sort_key)
         paths = []
         for drone_id in drone_ids:
-            entries = runtime.redis_client.lrange(_drone_path_key(drone_id), -point_limit, -1)
+            entries = app_state.redis_client.lrange(_drone_path_key(drone_id), -point_limit, -1)
             points = []
             for entry in entries:
                 point = _parse_json(entry)
