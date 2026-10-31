@@ -271,7 +271,8 @@ export const Dashboard: React.FC = () => {
               <MapAutoFit points={fireLocations} />
               <TileLayer
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+                url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                maxZoom={19}
               />
               {fireLocations.map((fireLocation, index) => (
                 <Marker key={`${fireLocation[0]}-${fireLocation[1]}-${index}`} position={fireLocation} icon={fireIcon}>
