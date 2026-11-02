@@ -227,4 +227,4 @@ networks:
 
 volumes:
   mysql_data:
-  frontend_node_moudles:
+  frontend_node_modules:
