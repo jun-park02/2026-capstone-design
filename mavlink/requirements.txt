@@ -4,3 +4,5 @@ uvicorn==0.40.0
 python-multipart==0.0.20
 opencv-python
 numpy
+prometheus-fastapi-instrumentator==7.1.0
+starlette==0.50.0

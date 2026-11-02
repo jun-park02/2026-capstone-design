@@ -12,6 +12,7 @@ import socket
 import struct
 import cv2
 import numpy as np
+from prometheus_fastapi_instrumentator import Instrumentator
 
 
 # Redis 서버 주소
@@ -75,6 +76,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Fire Detection Upload Receiver", lifespan=lifespan)
+
+Instrumentator(
+    should_group_status_codes=False,
+    excluded_handlers=[r"^/metrics$"]
+).instrument(app).expose(
+    app,
+    endpoint="/metrics",
+    include_in_schema=False
+)
 
 
 def now_str() -> str:

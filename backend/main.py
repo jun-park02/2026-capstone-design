@@ -7,6 +7,7 @@ from app import app_state
 from app.api.v1.routers import router as api_v1_router
 from app.fire_detect_listener import FireDetectListener
 from app.redis_consumer import RedisStreamConsumer
+from prometheus_fastapi_instrumentator import Instrumentator
 
 
 origins = [
@@ -86,3 +87,12 @@ app.add_middleware(
 )
 
 app.include_router(api_v1_router)
+
+Instrumentator(  # HTTP 요청 수와 응답 시간 등을 측정하는 계측 객체를 생성한다.
+    should_group_status_codes=False,  # 상태 코드를 2xx 등으로 묶지 않고 200, 400, 500 등으로 구분한다.
+    excluded_handlers=[r"^/metrics$"],  # /metrics 경로와 정확히 일치하는 수집 요청은 HTTP 통계에서 제외한다.
+).instrument(app).expose(  # 앱에 계측 미들웨어를 추가하고, 수집한 지표를 제공하는 엔드포인트를 등록한다.
+    app,  # 지표 조회 엔드포인트를 등록할 FastAPI 앱을 지정한다.
+    endpoint="/metrics",  # Prometheus가 지표를 읽어 갈 URL 경로를 지정한다.
+    include_in_schema=False,  # OpenAPI 스키마와 Swagger 문서에서 숨긴다. 실제 접근을 차단하지는 않는다.
+)
