@@ -513,7 +513,8 @@ def get_dashboard_summary(
     화재 이벤트 집계, 드론 상태, 최신 배터리 데이터, 지도 표시용 좌표를 함께 리턴
     """
     # 한국 시간(KST, UTC+9) 기준 집계 범위와 최근 30일 통계 기준 시점을 계산한다.
-    today_start, today_end, target_date = _day_bounds_utc()
+    # today_start, today_end, target_date = _day_bounds_utc()
+    today_start, today_end = _day_bounds_utc()
     evaluated_at = datetime.utcnow()
     recent_month_start = evaluated_at - timedelta(days=30)
 
@@ -577,7 +578,7 @@ def get_dashboard_summary(
     # 프론트 대시보드 컴포넌트가 바로 사용할 수 있는 형태로 지표와 지도 데이터를 묶어 반환한다.
     return {
         "ok": True,
-        "date": target_date,
+        # "date": target_date,
         "evaluated_at": evaluated_at.isoformat() + "Z",
         "status": _dashboard_status(session),
         "activeSuspects": active_suspects,
