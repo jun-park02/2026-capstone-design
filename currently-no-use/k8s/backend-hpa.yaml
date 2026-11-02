@@ -1,0 +1,41 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: capstone-design
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2  # 최소 pod 수
+  maxReplicas: 10  # 최대 pod 수
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70  # CPU 사용률이 70%를 넘으면 스케일 아웃
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 60  # 스케일 다운 안정화 시간
+      policies:
+      - type: Percent
+        value: 50  # 최대 50%씩 감소
+        periodSeconds: 60
+      - type: Pods
+        value: 1  # 또는 최소 1개씩 감소
+        periodSeconds: 60
+      selectPolicy: Min  # 둘 중 더 보수적인 정책 선택
+    scaleUp:
+      stabilizationWindowSeconds: 0  # 스케일 업은 즉시
+      policies:
+      - type: Percent
+        value: 100  # 최대 100%씩 증가
+        periodSeconds: 30
+      - type: Pods
+        value: 2  # 또는 최소 2개씩 증가
+        periodSeconds: 30
+      selectPolicy: Max  # 둘 중 더 공격적인 정책 선택
+

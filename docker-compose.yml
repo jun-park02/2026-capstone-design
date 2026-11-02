@@ -1,0 +1,259 @@
+name: 2026-capstone-design
+services:
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_USE_MOCK_DATA: ${VITE_USE_MOCK_DATA}
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: 
+      sh -c "npm ci && npm run dev -- --host 0.0.0.0 --port 5173 --strictPort"  
+
+  backend:
+    build:
+      context: ./backend 
+    container_name: fastapi
+    ports:
+      - "8000:8000"
+    environment:
+      # __pycache__ 를 생성하지 않음
+      - PYTHONDONTWRITEBYTECODE=1
+      # print() 같은 stdout 로그를 버퍼링없이 즉시 출력하게 함?
+      - PYTHONUNBUFFERED=1
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=mydb
+      - MYSQL_USER=user
+      - MYSQL_PASSWORD=password
+      - RAW_IMAGE_DIR=/app/images
+      - HEATMAP_IMAGE_DIR=/app/images/heatmaps
+      - HEATMAP_STREAM_KEY=heatmap
+      - HEATMAP_OVERLAY_OPACITY=0.35
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=ap-northeast-2
+      - AWS_S3_BUCKET=2026-capstone-design
+      - AWS_S3_KEY_PREFIX=fire-detect
+      # optional
+      - AWS_S3_PUBLIC_BASE_URL=
+      # optional
+      - AWS_S3_ENDPOINT_URL=
+      # 메일 설정
+      - GMAIL_USERNAME=${GMAIL_USERNAME}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - GMAIL_FROM_EMAIL=${GMAIL_FROM_EMAIL}
+      - GMAIL_FROM_NAME=${GMAIL_FROM_NAME}
+      - GMAIL_SMTP_HOST=${GMAIL_SMTP_HOST}
+      - GMAIL_SMTP_PORT=${GMAIL_SMTP_PORT}
+      - GMAIL_USE_TLS=${GMAIL_USE_TLS}
+      - FIRE_CONFIRM_BASE_URL=${FIRE_CONFIRM_BASE_URL}
+      - APP_BASE_URL=${APP_BASE_URL}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DRONE_STREAM_KEY=drone_telemetry
+      - FIRE_STREAM_KEY=fire_detect
+      - CONSUMER_GROUP=mygroup
+      - FIRE_DETECT_BLOCK_MS=5000
+    volumes:
+      - ./mavlink/images:/app/images
+    networks:
+      - app-network
+    depends_on:
+      - mysql
+  
+  drone-telemetry-udp-rx:
+    build:
+      context: ./mavlink
+    container_name: drone-telemetry-udp-rx
+    ports:
+      - "14550:14550/udp" 
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - UDP_PORT=14550
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - STREAM_KEY=drone_telemetry
+      - JSON_SAMPLE_INTERVAL_SEC=0.2
+      - SIMTIME_UNIT=seconds
+      - DEFAULT_DRONE_ID=1
+    command: python drone_telemetry_rx.py
+    networks:
+      - app-network
+    depends_on:
+      - redis
+  
+  # drone-tx-test-1:
+  #   build:
+  #     context: ./mavlink
+  #   container_name: drone-tx-test-1
+  #   environment:
+  #     - PYTHONDONTWRITEBYTECODE=1
+  #     - PYTHONUNBUFFERED=1
+  #     - TARGET_IP=drone-telemetry-udp-rx  # Docker 네트워크에서 서비스 이름으로 접근
+  #     - TARGET_PORT=14550
+  #     - CONTAINER_NAME=drone-tx-test-1
+  #     - DRONE_ID=1
+  #     - POSITION_OFFSET=0
+  #     - ALT_OFFSET=30
+  #     - BASE_VA=12.5
+  #     - ALT_VARIATION_METERS=8
+  #     - ALT_VARIATION_PERIOD_STEPS=120
+  #     - VA_VARIATION=2.0
+  #     - VA_VARIATION_PERIOD_STEPS=100
+  #     - BATTERY_SOC_DROP_PER_STEP=0.0002
+  #     - BATTERY_MIN_SOC=0.30
+  #     - BATTERY_VOLTAGE_DROP=6.0
+  #     - MOVEMENT_MODE=rectangle
+  #     - RECTANGLE_WIDTH_METERS=600
+  #     - RECTANGLE_HEIGHT_METERS=300
+  #     - RECTANGLE_PERIOD_STEPS=240
+  #     - VEHICLE_STATUS=MC_FLYING
+  #   command: python drone_tx_test_sender.py
+  #   networks:
+  #     - app-network
+  #   depends_on:
+  #     - drone-telemetry-udp-rx
+
+  # drone-tx-test-2:
+  #   build:
+  #     context: ./mavlink
+  #   container_name: drone-tx-test-2
+  #   environment:
+  #     - PYTHONDONTWRITEBYTECODE=1
+  #     - PYTHONUNBUFFERED=1
+  #     - TARGET_IP=drone-telemetry-udp-rx
+  #     - TARGET_PORT=14550
+  #     - CONTAINER_NAME=drone-tx-test-2
+  #     - DRONE_ID=2
+  #     - POSITION_OFFSET=0.006
+  #     - ALT_OFFSET=10
+  #     - MOVEMENT_MODE=circle
+  #     - CIRCLE_RADIUS_METERS=300
+  #     - CIRCLE_PERIOD_STEPS=180
+  #     - VEHICLE_STATUS=MC_FLYING
+  #   command: python drone_tx_test_sender.py
+  #   networks:
+  #     - app-network
+  #   depends_on:
+  #     - drone-telemetry-udp-rx
+
+  # drone-tx-test-3:
+  #   build:
+  #     context: ./mavlink
+  #   container_name: drone-tx-test-3
+  #   environment:
+  #     - PYTHONDONTWRITEBYTECODE=1
+  #     - PYTHONUNBUFFERED=1
+  #     - TARGET_IP=drone-telemetry-udp-rx
+  #     - TARGET_PORT=14550
+  #     - CONTAINER_NAME=drone-tx-test-3
+  #     - DRONE_ID=3
+  #     - POSITION_OFFSET=0.012
+  #     - ALT_OFFSET=20
+  #     - MOVEMENT_MODE=linear
+  #     - VEHICLE_STATUS=MC_FLYING
+  #   command: python drone_tx_test_sender.py
+  #   networks:
+  #     - app-network
+  #   depends_on:
+  #     - drone-telemetry-udp-rx
+
+  image-upload-fastapi:
+    build:
+      context: ./mavlink
+    container_name: image-upload-fastapi
+    ports:
+      - "14551:8000"
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - HTTP_PORT=8000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - STREAM_KEY=fire_detect
+      - HEATMAP_STREAM_KEY=heatmap
+      - IMG_SAVE_DIR=/app/images
+      - HEATMAP_IMG_SAVE_DIR=/app/images/heatmaps
+      - MAX_UPLOAD_BYTES=20971520
+    command: python fastapi_image_upload.py
+    volumes:
+      - ./mavlink/images:/app/images
+    networks:
+      - app-network
+    depends_on:
+      - redis
+  
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+
+  mysql:
+    image: mysql:8.4.8
+    ports:
+      - "23306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=mydb
+      - MYSQL_USER=user
+      - MYSQL_PASSWORD=password
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - app-network
+  
+  redis_insight:
+    image: redis/redisinsight:latest
+    container_name: redis_insight
+    ports:
+      - "5540:5540"
+    environment:
+      - RI_REDIS_HOST=host.docker.internal
+    networks:
+      - app-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - app-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  frontend_node_modules:
+  prometheus_data:
+  grafana_data:

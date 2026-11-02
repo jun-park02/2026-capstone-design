@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: capstone-design
+data:
+  # Redis 설정
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  STREAM_KEY: "mystream"
+  CONSUMER_GROUP: "mygroup"
+  
+  # Backend 설정
+  REDIS_BATCH_SIZE: "100"
+  REDIS_BLOCK_TIMEOUT: "5000"
+  REDIS_POLL_INTERVAL: "0.01"
+  
+  # UDP 설정
+  UDP_PORT: "14550"
+  TARGET_PORT: "14550"
+

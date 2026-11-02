@@ -1,0 +1,534 @@
+import json
+import os
+import time
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+import redis
+import uvicorn
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+import socket
+import struct
+import cv2
+import numpy as np
+from prometheus_fastapi_instrumentator import Instrumentator
+
+
+# Redis 서버 주소
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+# Redis 서버 포트
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+# 업로드 완료 이벤트를 발행할 Redis Stream 키
+STREAM_KEY = os.getenv("STREAM_KEY", "fire_detect")
+HEATMAP_STREAM_KEY = os.getenv("HEATMAP_STREAM_KEY", "heatmap")
+# 업로드된 RGB 이미지를 저장할 컨테이너 내부 경로
+IMAGE_SAVE_DIR = os.getenv("IMG_SAVE_DIR", "/app/images")
+# 업로드된 IR 이미지를 저장할 컨테이너 내부 경로
+IR_IMAGE_SAVE_DIR = os.getenv("IR_IMG_SAVE_DIR", "/app/images/irs")
+# Uploaded heatmap image save directory
+HEATMAP_IMAGE_SAVE_DIR = os.getenv("HEATMAP_IMG_SAVE_DIR", "/app/images/heatmaps")
+# FastAPI 업로드 서버가 바인딩할 주소
+HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
+# FastAPI 업로드 서버가 바인딩할 포트
+HTTP_PORT = int(os.getenv("HTTP_PORT", "8000"))
+# 허용할 최대 이미지 업로드 크기
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+# 업로드를 허용할 이미지 확장자 목록
+ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+
+
+redis_client: redis.Redis | None = None
+
+
+def create_redis_client() -> redis.Redis:
+    client = redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=0,
+        decode_responses=True,
+        socket_connect_timeout=5,
+    )
+    client.ping()
+    print(f"[FIRE-DETECT-UPLOAD] Redis connected: {REDIS_HOST}:{REDIS_PORT}")
+    return client
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global redis_client
+    try:
+        redis_client = create_redis_client()
+    except Exception as exc:
+        redis_client = None
+        print(f"[FIRE-DETECT-UPLOAD] Redis connection failed: {exc}")
+
+    Path(IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+    Path(IR_IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+    Path(HEATMAP_IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+    print(f"[FIRE-DETECT-UPLOAD] HTTP upload server: {HTTP_HOST}:{HTTP_PORT}")
+    print(f"[FIRE-DETECT-UPLOAD] Redis Stream: {STREAM_KEY}")
+    print(f"[FIRE-DETECT-UPLOAD] Image save dir: {IMAGE_SAVE_DIR}")
+    yield
+
+    if redis_client:
+        redis_client.close()
+
+
+app = FastAPI(title="Fire Detection Upload Receiver", lifespan=lifespan)
+
+Instrumentator(
+    should_group_status_codes=False,
+    excluded_handlers=[r"^/metrics$"]
+).instrument(app).expose(
+    app,
+    endpoint="/metrics",
+    include_in_schema=False
+)
+
+
+def now_str() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def normalize_image_format(value: Any, filename: str | None = None, content_type: str | None = None) -> str:
+    # form-data의 image_format 값을 먼저 사용하고, 앞의 점과 대소문자를 정리한다.
+    image_format = str(value or "").strip().lower().lstrip(".")
+    # image_format이 없으면 업로드 파일명 확장자에서 이미지 형식을 추출한다.
+    if not image_format and filename:
+        image_format = Path(filename).suffix.lower().lstrip(".")
+    # 파일명에서도 얻지 못하면 Content-Type 값에서 이미지 형식을 추출한다.
+    if not image_format and content_type:
+        image_format = content_type.split("/")[-1].lower()
+    # jpeg와 jpg는 같은 형식으로 취급하기 위해 jpg로 통일한다.
+    if image_format == "jpeg":
+        image_format = "jpg"
+    # 허용하지 않는 이미지 형식이면 요청을 거절한다.
+    if image_format not in ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="unsupported image format")
+    return image_format
+
+
+def safe_id(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value.strip())
+    return cleaned[:80] or uuid.uuid4().hex
+
+
+def first_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def parse_metadata(metadata: str | None) -> dict[str, Any]:
+    if not metadata:
+        return {}
+
+    try:
+        parsed = json.loads(metadata)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="metadata must be valid JSON") from exc
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="metadata must be a JSON object")
+    return parsed
+
+
+def metadata_value(source: Any, *keys: str) -> Any:
+    if not isinstance(source, dict):
+        return None
+
+    for key in keys:
+        value = source.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def normalize_captured_at(value: Any) -> Any:
+    if value is None or value == "":
+        return None
+
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+async def save_upload_file(upload: UploadFile, image_path: Path) -> int:
+    size = 0
+    # 업로드된 이미지를 지정된 경로에 바이너리 파일로 저장한다.
+    with image_path.open("wb") as output:
+        while True:
+            # 메모리 사용을 줄이기 위해 1MB 단위로 나누어 읽는다.
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                # 허용 크기를 초과하면 저장 중인 파일을 닫고 삭제한다.
+                output.close()
+                image_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="uploaded image is too large")
+            output.write(chunk)
+    return size
+
+
+def require_redis_client() -> redis.Redis:
+    global redis_client
+    if redis_client is None:
+        try:
+            redis_client = create_redis_client()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Redis unavailable: {exc}") from exc
+    return redis_client
+
+
+def publish_completed_event(payload: dict[str, Any], stream_key: str = STREAM_KEY) -> str:
+    client = require_redis_client()
+    try:
+        msg_id = client.xadd(
+            stream_key,
+            {"payload": json.dumps(payload, ensure_ascii=False)},
+            maxlen=10000,
+            approximate=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Redis publish failed: {exc}") from exc
+
+    print(
+        "[FIRE-DETECT-UPLOAD] Redis event published: "
+        f"stream={stream_key} id={msg_id} "
+        f"event_id={payload.get('event_id') or payload.get('heatmap_id')} "
+        f"image={payload.get('image_name') or payload.get('image_count')}"
+    )
+    return str(msg_id)
+
+
+@app.get("/health")
+def health():
+    redis_ok = False
+    if redis_client is not None:
+        try:
+            redis_ok = bool(redis_client.ping())
+        except Exception:
+            redis_ok = False
+
+    return {
+        "ok": True,
+        "redis_connected": redis_ok,
+        "stream_key": STREAM_KEY,
+        "heatmap_stream_key": HEATMAP_STREAM_KEY,
+        "image_save_dir": IMAGE_SAVE_DIR,
+        "heatmap_image_save_dir": HEATMAP_IMAGE_SAVE_DIR,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+    }
+
+@app.post("/heatmap/upload")
+async def upload_heatmap_image(
+    request: Request,
+    image_0: UploadFile | None = File(None, alias="image_0"),
+    image_1: UploadFile | None = File(None, alias="image_1"),
+    image_2: UploadFile | None = File(None, alias="image_2"),
+    image_3: UploadFile | None = File(None, alias="image_3"),
+    image_4: UploadFile | None = File(None, alias="image_4"),
+    image_5: UploadFile | None = File(None, alias="image_5"),
+    meta_json: str | None = Form(None, examples=[""]),
+):
+    try:
+        data = json.loads(meta_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="meta_json must be valid JSON") from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="meta_json must be a JSON object")
+
+    x_min = data.get("x_min")
+    x_max = data.get("x_max")
+    y_min = data.get("y_min")
+    y_max = data.get("y_max")
+    lat = data.get("lat")
+    lon = data.get("lon")
+    radius_km = data.get("radius_km")
+    num_times = data.get("num_times")
+    opacity = data.get("opacity", 0.35)
+
+    if any(value is None or value == "" for value in (x_min, x_max, y_min, y_max)):
+        raise HTTPException(status_code=400, detail="x_min, x_max, y_min, y_max are required")
+
+    print(data)
+
+    heatmap_id = safe_id(str(data.get("heatmap_id") or f"heatmap-{int(time.time() * 1000)}"))
+    Path(HEATMAP_IMAGE_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+
+    heatmap_images = [
+        ("image_0", image_0),
+        ("image_1", image_1),
+        ("image_2", image_2),
+        ("image_3", image_3),
+        ("image_4", image_4),
+        ("image_5", image_5),
+    ]
+    uploaded_images = [(field_name, upload) for field_name, upload in heatmap_images if upload is not None]
+    if not uploaded_images:
+        raise HTTPException(status_code=400, detail="at least one heatmap image is required")
+
+    saved_images = []
+    for frame_index, (field_name, upload) in enumerate(uploaded_images):
+        image_ext = normalize_image_format(None, upload.filename, upload.content_type)
+        image_name = f"{heatmap_id}_frame_{frame_index:03d}.{image_ext}"
+        image_path = Path(HEATMAP_IMAGE_SAVE_DIR) / image_name
+
+        image_size_bytes = await save_upload_file(upload, image_path)
+        if image_size_bytes <= 0:
+            image_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"{field_name} is empty")
+
+        saved_images.append(
+            {
+                "field_name": field_name,
+                "frame_index": frame_index,
+                "image_name": image_name,
+                "image_path": str(image_path),
+                "image_size_bytes": image_size_bytes,
+                "original_filename": upload.filename,
+                "content_type": upload.content_type,
+                "prediction_minutes": (frame_index + 1) * 10,
+                "label": f"{(frame_index + 1) * 10}분 뒤 확산 예측 히트맵",
+            }
+        )
+
+    client_host = request.client.host if request.client else None
+    coordinates = {
+        "bottom_left": {"x": x_min, "y": y_min},
+        "top_right": {"x": x_max, "y": y_max},
+    }
+    payload = {
+        "event_type": "heatmap_uploaded",
+        "received_at": now_str(),
+        "heatmap_id": heatmap_id,
+        "image_count": len(saved_images),
+        "frames": saved_images,
+        "coordinates": coordinates,
+        "opacity": opacity,
+        "src_ip": client_host,
+        "metadata": {
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "lat": lat,
+            "lon": lon,
+            "radius_km": radius_km,
+            "num_times": num_times,
+        },
+    }
+    msg_id = publish_completed_event(payload, HEATMAP_STREAM_KEY)
+    print(
+        "[HEATMAP-UPLOAD] images saved: "
+        f"heatmap_id={heatmap_id} count={len(saved_images)} stream_id={msg_id}"
+    )
+
+    for saved_image in saved_images:
+        image_path = saved_image["image_path"]
+        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+
+        if img is None:
+            raise HTTPException(status_code=400, detail=f"failed to read {saved_image['field_name']}")
+
+        if len(img.shape) == 3 and img.shape[2] == 4:
+            # 이미 알파 채널(4채널)이 있는 PNG라면 그대로 사용
+            rgba = img.copy()
+        else:
+            # 알파 채널이 없는 일반 PNG(또는 JPG)라면 알파 채널 추가
+            rgba = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+
+        # 3. 검은색 픽셀 조건 (R, G, B가 모두 10 이하)
+        # 이미 투명한 부분은 건드리지 않고, 검은색 픽셀만 찾습니다.
+
+        black_pixels = np.where(
+            (rgba[:, :, 2] <= 120)
+        )
+
+        # 4. 검은색 픽셀의 투명도(Alpha)를 0(완전 투명)으로 변경
+        rgba[black_pixels] = [0, 0, 0, 0]
+
+        # 5. 결과 저장
+        cv2.imwrite(image_path, rgba)
+
+    return {
+        "ok": True,
+        "id": msg_id,
+        "stream_key": HEATMAP_STREAM_KEY,
+        "heatmap_id": heatmap_id,
+        "image_count": len(saved_images),
+        "images": saved_images,
+        "coordinates": coordinates,
+        "opacity": opacity,
+        "src_ip": client_host,
+        "metadata": {
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "lat": lat,
+            "lon": lon,
+            "radius_km": radius_km,
+            "num_times": num_times,
+        },
+    }
+
+@app.post("/fire-detections/upload")
+async def upload_fire_detection(
+    request: Request,
+    rgb_image: UploadFile | None = File(None, alias="RGB_image"),
+    ir_image: UploadFile | None = File(None, alias="IR_image"),
+    metadata: str | None = Form(None),
+    event_id: str | None = Form(None, examples=["fire-test-001"]),
+    image_id: str | None = Form(None, examples=["img-test-001"]),
+    captured_at: str | None = Form(None, examples=["2026-04-28T12:30:00"]),
+    lat: str | None = Form(None, examples=["37.5665"]),
+    lon: str | None = Form(None, examples=["126.9780"]),
+    alt: str | None = Form(None, examples=["120.5"]),
+    confidence: str | None = Form(None, examples=["0.92"]),
+    # system_id: str | None = Form(None, examples=["1"]),
+    image_format: str | None = Form(None, examples=["jpg"]),
+):
+    print(rgb_image)
+
+    metadata_obj = parse_metadata(metadata)
+    gps = metadata_obj.get("gps") if metadata_obj.get("gps") is not None else None
+    detection = metadata_obj.get("detection")
+    if rgb_image is None:
+        raise HTTPException(status_code=400, detail="RGB_image file is required")
+
+    system_id = metadata_obj.get("system_id")
+    captured_at = first_value(captured_at, normalize_captured_at(metadata_obj.get("timestamp")))
+
+    lat = gps.get("Latitude") if gps is not None else 0
+    lon = gps.get("Longitude") if gps is not None else 0
+    alt = first_value(alt, metadata_value(gps, "Altitude", "altitude", "alt"))
+    
+    confidene = None
+
+    # print(detection)
+    # {'objects': [{'class': 'Smoke', 'conf': 0.5803520083427429, 'bbox': [241, 0, 157, 45]}, {'class': 'Fire', 'conf': 0.3345894515514374, 'bbox': [284, 35, 70, 23]}]}
+    # print("objects:", detection.get("objects"))
+    # print("objects[0]:", detection.get("objects")[0])
+    # print("objects[1]:", detection.get("objects")[1])
+    try:
+        confidence = max(float(detection.get("objects")[0].get("conf")), float(detection.get("objects")[1].get("conf")))
+    except Exception as e:
+        confidence = detection.get("objects")[0].get("conf")
+
+        
+    print("Confidence:", confidence)
+    # confidence = first_value(confidence, metadata_value(detection, "conf", "Confidence", "score", "Score"))
+
+    # 요청으로 받은 이미지 형식을 허용된 확장자로 정규화한다.
+    image_ext = normalize_image_format(image_format, rgb_image.filename, rgb_image.content_type)
+    # event_id와 image_id가 없으면 테스트용 ID를 생성하고, 파일명에 안전한 형태로 정리한다.
+    normalized_event_id = safe_id(event_id or f"fire-{int(time.time() * 1000)}")
+    normalized_image_id = safe_id(image_id or uuid.uuid4().hex[:12])
+    # 이벤트 ID와 이미지 ID를 조합해서 저장할 이미지 파일명을 만든다.
+    image_name = f"{normalized_event_id}_{normalized_image_id}.{image_ext}"
+    # 컨테이너 내부 이미지 저장 경로를 만든다.
+    image_path = Path(IMAGE_SAVE_DIR) / image_name
+
+    # --------------------------------------------------------
+
+    if ir_image is None:
+        raise HTTPException(status_code=400, detail="uploaded image is empty")
+
+
+    ir_image_ext = normalize_image_format(image_format, ir_image.filename, ir_image.content_type)
+    ir_image_name = f"{normalized_event_id}_{normalized_image_id}_ir.{ir_image_ext}"
+    ir_image_path = Path(IR_IMAGE_SAVE_DIR) / ir_image_name
+    
+    # 업로드된 이미지를 로컬 공유 볼륨에 저장한다.
+    image_size_bytes = await save_upload_file(rgb_image, image_path)
+    ir_image_size_bytes = await save_upload_file(ir_image, ir_image_path)
+
+    if image_size_bytes <= 0:
+        # unlink는 pathlib.Path 객체에서 파일을 삭제하는 메서드
+        # missing_ok=True는 파일이 이미 없어도 에러를 내지 말라는 의미
+        image_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="uploaded image is empty")
+    
+    if ir_image_size_bytes <= 0:
+        ir_image_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="uploaded image is empty")
+
+    # --------------------------------------------------------
+
+    # 요청을 보낸 클라이언트 IP를 payload에 남긴다.
+    client_host = request.client.host if request.client else None
+    # 백엔드 FireDetectListener가 처리할 수 있도록 Redis Stream에 넣을 payload를 만든다.
+    payload = {
+        "received_at": now_str(),
+        "event_id": normalized_event_id,
+        "image_id": normalized_image_id,
+        "captured_at": captured_at,
+        "lat": lat,
+        "lon": lon,
+        "alt": alt,
+        "confidence": confidence,
+        "system_id": system_id,
+        "image_format": image_ext,
+        "image_name": image_name,
+        "image_path": str(image_path),
+        "image_size_bytes": image_size_bytes,
+        "src_ip": client_host,
+        "upload_method": "http_multipart",
+        "original_filename": rgb_image.filename,
+        "content_type": rgb_image.content_type,
+    }
+    # 이미지 저장 완료 이벤트를 Redis Stream에 발행한다.
+    msg_id = publish_completed_event(payload)
+
+    # TCP 코드 여기에!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    max_retries = 3
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+                client_socket.settimeout(5)
+                client_socket.connect(("192.168.0.31", 50000))
+
+                # lat = 36.693575
+                # lon = 126.580372 
+
+                # client_socket.connect(("192.168.1.127", 50000))
+                # client_socket.sendall(data)
+
+                message = {
+                    "lat": 36.693575 if lat is None else lat,
+                    "lon": 126.580372 if lon is None else lon
+                }
+
+                # JSON 문자열 + 개행 문자
+                data = json.dumps(message) + "\n"
+                data = data.encode("utf-8")
+                client_socket.sendall(data)
+            break
+        except Exception as e:
+            print(e)
+
+            if attempt == max_retries:
+                print("failed")
+
+    # 업로드 요청을 보낸 클라이언트에게 처리 결과를 반환한다.
+    return {
+        "ok": True,
+        "id": msg_id,
+        "stream_key": STREAM_KEY,
+        "event_id": normalized_event_id,
+        "image_id": normalized_image_id,
+        "image_name": image_name,
+        "image_size_bytes": image_size_bytes,
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run("fastapi_image_upload:app", host=HTTP_HOST, port=HTTP_PORT)

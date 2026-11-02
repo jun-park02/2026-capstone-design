@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udp-tx
+  namespace: capstone-design
+  labels:
+    app: udp-tx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: udp-tx
+  template:
+    metadata:
+      labels:
+        app: udp-tx
+    spec:
+      containers:
+      - name: udp-tx
+        # 이미지 빌드 후 레지스트리에 푸시 필요
+        image: udp-tx:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "tx.py"]
+        env:
+        - name: TARGET_IP
+          value: "udp-rx-service"  # Kubernetes 서비스 이름
+        - name: TARGET_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: TARGET_PORT
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+

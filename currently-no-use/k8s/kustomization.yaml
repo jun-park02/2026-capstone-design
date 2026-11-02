@@ -1,0 +1,16 @@
+# Kustomize를 사용한 배포 (선택사항)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: capstone-design
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - redis-deployment.yaml
+  - backend-deployment.yaml
+  - backend-hpa.yaml
+  - udp-rx-deployment.yaml
+  - udp-tx-deployment.yaml
+  # - ingress.yaml  # 필요시 주석 해제
+
