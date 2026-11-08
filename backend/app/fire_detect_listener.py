@@ -17,7 +17,7 @@ from app.models import FireEvent, FireEventImage
 
 
 class FireDetectListener:
-    """fire_detect Redis Stream 리스너."""
+    """fire_detect Redis Stream 리스너"""
 
     def __init__(
         self,
