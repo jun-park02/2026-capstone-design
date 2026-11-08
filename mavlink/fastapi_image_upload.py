@@ -349,7 +349,8 @@ async def upload_fire_detection(
 
     # 요청을 보낸 클라이언트 IP를 payload에 남긴다.
     client_host = request.client.host if request.client else None
-    # 백엔드 FireDetectListener가 처리할 수 있도록 Redis Stream에 넣을 payload를 만든다.
+
+    # Redis Stream에 넣을 payload(FireDetectListener가 처리)
     payload = {
         "received_at": now_str(),
         "event_id": normalized_event_id,
