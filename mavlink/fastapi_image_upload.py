@@ -404,6 +404,7 @@ async def upload_fire_detection(
 
             if attempt == max_retries:
                 print("failed")
+                logger.exception(f"[image_upload_fastapi] lat, lon tcp sending fail: {e}")
 
     # 업로드 요청을 보낸 클라이언트에게 처리 결과를 반환한다.
     return {
