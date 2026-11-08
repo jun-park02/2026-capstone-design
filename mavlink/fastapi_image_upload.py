@@ -334,6 +334,7 @@ async def upload_fire_detection(
     image_size_bytes = await save_upload_file(rgb_image, image_path)
     ir_image_size_bytes = await save_upload_file(ir_image, ir_image_path)
 
+    # 여기 나중에 save_upload_file 함수 내부로 옮길지 검토
     if image_size_bytes <= 0:
         # unlink는 pathlib.Path 객체에서 파일을 삭제하는 메서드
         # missing_ok=True는 파일이 이미 없어도 에러를 내지 말라는 의미
