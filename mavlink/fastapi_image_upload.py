@@ -268,31 +268,47 @@ async def upload_fire_detection(
 ):
     logger.info("[backend]: upload api called") # extra 매개변수
     # logger.exception()
+
+    metadata_dic = json.loads(metadata)
+
+    try: 
+        gps = metadata_dic.get("gps")
+        detection = metadata_dic.get("detection")   
+        # detection 
+        # # {'objects': [{'class': 'Smoke', 'conf': 0.5803520083427429, 'bbox': [241, 0, 157, 45]}, {'class': 'Fire', 'conf': 0.3345894515514374, 'bbox': [284, 35, 70, 23]}]}
+        system_id = metadata_dic.get("system_id")
+
+        # captured_at = first_value(captured_at, normalize_captured_at(metadata_dic.get("timestamp")))
+        captured_at = metadata_dic.get("timestamp")
+
+        lat = gps.get("Latitude") 
+        lon = gps.get("Longitude") 
+
+        # alt = first_value(alt, metadata_value(gps, "Altitude", "altitude", "alt"))
+        alt = gps.get("Altitude")
+
+        objs = detection.get("objects")
+
+        confidence = None
+
+        for obj in objs:
+            if obj["class"] == "fire":
+                confidence = obj["conf"]
+
+        if confidence == None:
+            # raise Exception()       
+            pass
+
+    except Exception as e:
+        logger.exception()
+
     if rgb_image is None:
         raise HTTPException(status_code=400, detail="RGB_image file is required")
 
-    system_id = metadata_obj.get("system_id")
-    captured_at = first_value(captured_at, normalize_captured_at(metadata_obj.get("timestamp")))
-
-    lat = gps.get("Latitude") if gps is not None else 0
-    lon = gps.get("Longitude") if gps is not None else 0
-    alt = first_value(alt, metadata_value(gps, "Altitude", "altitude", "alt"))
-    
-    confidene = None
-
-    # print(detection)
-    # {'objects': [{'class': 'Smoke', 'conf': 0.5803520083427429, 'bbox': [241, 0, 157, 45]}, {'class': 'Fire', 'conf': 0.3345894515514374, 'bbox': [284, 35, 70, 23]}]}
-    # print("objects:", detection.get("objects"))
-    # print("objects[0]:", detection.get("objects")[0])
-    # print("objects[1]:", detection.get("objects")[1])
-    try:
-        confidence = max(float(detection.get("objects")[0].get("conf")), float(detection.get("objects")[1].get("conf")))
-    except Exception as e:
-        confidence = detection.get("objects")[0].get("conf")
-
-        
-    print("Confidence:", confidence)
-    # confidence = first_value(confidence, metadata_value(detection, "conf", "Confidence", "score", "Score"))
+    # try:
+    #     confidence = max(float(detection.get("objects")[0].get("conf")), float(detection.get("objects")[1].get("conf")))
+    # except Exception as e:
+    #     confidence = detection.get("objects")[0].get("conf")
 
     # 요청으로 받은 이미지 형식을 허용된 확장자로 정규화한다.
     image_ext = normalize_image_format(image_format, rgb_image.filename, rgb_image.content_type)
