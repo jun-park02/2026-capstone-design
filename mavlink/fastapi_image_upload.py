@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 from prometheus_fastapi_instrumentator import Instrumentator
 from logging_config import get_logger
+from fastapi import Depends
 from utils.fastapi_image_upload import (
     MAX_UPLOAD_BYTES,
     STREAM_KEY,
@@ -263,12 +264,10 @@ async def upload_fire_detection(
     confidence: str | None = Form(None, examples=["0.92"]),
     # system_id: str | None = Form(None, examples=["1"]),
     image_format: str | None = Form(None, examples=["jpg"]),
+    logger = Depends(get_logger)
 ):
-    print(rgb_image)
-
-    metadata_obj = parse_metadata(metadata)
-    gps = metadata_obj.get("gps") if metadata_obj.get("gps") is not None else None
-    detection = metadata_obj.get("detection")
+    logger.info("[backend]: upload api called") # extra 매개변수
+    # logger.exception()
     if rgb_image is None:
         raise HTTPException(status_code=400, detail="RGB_image file is required")
 
