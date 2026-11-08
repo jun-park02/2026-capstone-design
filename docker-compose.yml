@@ -261,3 +261,4 @@ volumes:
   frontend_node_modules:
   prometheus_data:
   grafana_data:
+  app_logs:
