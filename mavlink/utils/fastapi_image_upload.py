@@ -119,7 +119,7 @@ async def save_upload_file(upload: UploadFile, image_path: Path) -> int:
             if size > MAX_UPLOAD_BYTES:
                 # 허용 크기를 초과하면 저장 중인 파일을 닫고 삭제한다.
                 output.close()
-                image_path.unlink(missing_ok=True)
+                image_path.unlink(missing_ok=True) # unlink는 해당 경로의 파일을 삭제
                 raise HTTPException(status_code=413, detail="uploaded image is too large")
             output.write(chunk)
     return size
