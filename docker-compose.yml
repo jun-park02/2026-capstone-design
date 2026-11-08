@@ -59,8 +59,10 @@ services:
       - FIRE_STREAM_KEY=fire_detect
       - CONSUMER_GROUP=mygroup
       - FIRE_DETECT_BLOCK_MS=5000
+      - LOG_SERVICE_NAME=backend
     volumes:
       - ./mavlink/images:/app/images
+      - app_logs:/var/log/capstone
     networks:
       - app-network
     depends_on:
@@ -181,9 +183,11 @@ services:
       - IMG_SAVE_DIR=/app/images
       - HEATMAP_IMG_SAVE_DIR=/app/images/heatmaps
       - MAX_UPLOAD_BYTES=20971520
+      - LOG_SERVICE_NAME=image_upload_fastapi
     command: python fastapi_image_upload.py
     volumes:
       - ./mavlink/images:/app/images
+      - app_logs:/var/log/capstone
     networks:
       - app-network
     depends_on:
