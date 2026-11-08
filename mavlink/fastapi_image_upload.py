@@ -393,7 +393,8 @@ async def upload_fire_detection(
                     "lon": lon
                 }
 
-                # JSON 문자열 + 개행 문자
+                # JSON 문자열 + 개행 문자(필요한지는 수신 코드에 따라 다름. readline() 처럼 개행까지
+                # 읽는 방식이면 필요. 연결이 종료될때까지 읽는 방식이면 없어도 됨)
                 data = json.dumps(message) + "\n"
                 data = data.encode("utf-8")
                 client_socket.sendall(data)
