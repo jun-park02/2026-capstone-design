@@ -389,8 +389,8 @@ async def upload_fire_detection(
                 # client_socket.sendall(data)
 
                 message = {
-                    "lat": 36.693575 if lat is None else lat,
-                    "lon": 126.580372 if lon is None else lon
+                    "lat": lat,
+                    "lon": lon
                 }
 
                 # JSON 문자열 + 개행 문자
