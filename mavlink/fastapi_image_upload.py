@@ -373,7 +373,7 @@ async def upload_fire_detection(
     # 이미지 저장 완료 이벤트를 Redis Stream에 발행한다.
     msg_id = publish_completed_event(payload)
 
-    # TCP 코드 여기에!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    # TCP 코드
     max_retries = 3
 
     for attempt in range(1, max_retries + 1):
