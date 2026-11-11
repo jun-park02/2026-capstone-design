@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app import app_state
-from app.models import DashboardAggregate, DroneTelemetry, FireEvent, FireEventEmailNotification
+from app.models import DroneTelemetry, FireEvent, FireEventEmailNotification
 
 DRONE_LAST_SEEN_KEY = os.getenv("DRONE_LAST_SEEN_KEY", "drone:last_seen")
 DRONE_STATUS_KEY_PREFIX = os.getenv("DRONE_STATUS_KEY_PREFIX", "drone:status")
@@ -64,11 +64,6 @@ def _to_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _today_kst() -> date:
-    return datetime.now(UTC).astimezone(timezone(timedelta(hours=9))).date()
-
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -128,20 +123,6 @@ def _drone_sort_key(drone_id: Any) -> tuple[int, int | str]:
         return (0, int(drone_id))
     except (TypeError, ValueError):
         return (1, str(drone_id))
-
-
-def _serialize_aggregate(row: DashboardAggregate) -> dict:
-    return {
-        "id": row.id,
-        "aggregate_date": row.aggregate_date.isoformat(),
-        "metric_key": row.metric_key,
-        "metric_value": float(row.metric_value),
-        "metric_unit": row.metric_unit,
-        "description": row.description,
-        "extra": row.extra,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-    }
 
 
 def _count_fire_events_between(
