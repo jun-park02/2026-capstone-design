@@ -1,0 +1,20 @@
+filebeat.inputs:
+  - type: filestream # 로그 파일에 추가된 내용을 읽음
+    id: capstone-application-logs
+    enabled: true
+  
+    paths: 
+      - /var/log/capstone/*/app.jsonl* # 두 서비스의 로그와 회전된 파일을 찾음
+    
+    parsers:
+      - ndjson: # 한 줄에 JSON 객체 하나인 로그를 해석
+          target: "" # JSON 필드를 문서 최상위에 넣음
+          overwrite_keys: true # 어플리케이션이 기록한 @timestamp 등을 사용
+          add_error_key: true
+
+output.elasticsearch:
+  hosts:
+    - "http://elasticsearch:9200"
+
+setup.kibana:
+  host: "http://kibana:5601"

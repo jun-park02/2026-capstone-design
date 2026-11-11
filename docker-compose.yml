@@ -252,6 +252,48 @@ services:
       - prometheus
     restart: unless-stopped
 
+  elasticsearch:
+    # 얘네는 버전을 맞추는게 좋음
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    mem_limit: 2g
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.5.5
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    ports:
+      - "5601:5601"
+    networks:
+      - app-network
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:9.5.5
+    user: root
+    command: ["-e", "--strict.perms=false"]
+    volumes:
+      - ./monitoring/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - app_logs:/var/log/capstone:ro
+      - filebeat_data:/usr/share/filebeat/data
+    networks:
+      - app-network
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+
 networks:
   app-network:
     driver: bridge
@@ -262,3 +304,5 @@ volumes:
   prometheus_data:
   grafana_data:
   app_logs:
+  elasticsearch_data:
+  filebeat_data:
