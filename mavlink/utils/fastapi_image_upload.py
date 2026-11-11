@@ -152,9 +152,9 @@ def publish_completed_event(payload: dict[str, Any], stream_key: str = STREAM_KE
     try:
         msg_id = client.xadd(
             stream_key,
-            {"payload": json.dumps(payload, ensure_ascii=False)},
-            maxlen=10000,
-            approximate=True,
+            {"payload": json.dumps(payload, ensure_ascii=False)}, 
+            maxlen=10000,  # 스트림에 유지할 항목 수 제한
+            approximate=True,  # 성능을 위해 제한 개수의 일시적 초과 허용
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Redis publish failed: {exc}") from exc
