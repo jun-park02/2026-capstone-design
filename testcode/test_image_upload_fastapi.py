@@ -1,5 +1,7 @@
 import requests
 import json
+import time
+from datetime import datetime, UTC
 
 IMAGE_UPLOAD_FASTAPI = "http://localhost:14551"
 
@@ -19,7 +21,7 @@ def test_upload_rgb_and_ir_images(
 
     data = {
         "metadata": json.dumps({
-            "timestamp": 1761976559.123,
+            "timestamp": datetime.fromtimestamp(time.time() - 0.9, UTC).isoformat(),
             "gps": {
                 "Latitude": "37.5985",
                 "Longitude": "126.9380",
