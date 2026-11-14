@@ -44,6 +44,7 @@ def test_upload_rgb_and_ir_images(
         data=data
     )
 
+    # assert 검사할 조건, 실패할 때 보여줄 메시지
     assert res.status_code == 200, res.text
     print(res.json())
     assert res.json()["ok"] == True
