@@ -278,8 +278,8 @@ async def upload_fire_detection(
         # # {'objects': [{'class': 'Smoke', 'conf': 0.5803520083427429, 'bbox': [241, 0, 157, 45]}, {'class': 'Fire', 'conf': 0.3345894515514374, 'bbox': [284, 35, 70, 23]}]}
         system_id = metadata_dic.get("system_id")
 
-        # captured_at = first_value(captured_at, normalize_captured_at(metadata_dic.get("timestamp")))
-        captured_at = metadata_dic.get("timestamp")
+        captured_at = first_value(captured_at, normalize_captured_at(metadata_dic.get("timestamp")))
+        # captured_at = metadata_dic.get("timestamp")
 
         lat = gps.get("Latitude") 
         lon = gps.get("Longitude") 
@@ -289,10 +289,20 @@ async def upload_fire_detection(
 
         objs = detection.get("objects")
 
+        print("gps", gps)
+        print("detection", detection)
+        print("system_id", system_id)
+        print("captured_at", captured_at)
+        print("lat", lat)
+        print("lon", lon)
+        print("alt", alt)
+        print("gps", objs)
+
+
         confidence = None
 
         for obj in objs:
-            if obj["class"] == "fire":
+            if obj["class"] == "Fire":
                 confidence = obj["conf"]
 
         if confidence == None:
@@ -300,6 +310,7 @@ async def upload_fire_detection(
             pass
 
     except Exception as e:
+        print(e)
         logger.exception()
 
     if rgb_image is None:
@@ -380,7 +391,7 @@ async def upload_fire_detection(
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
                 client_socket.settimeout(5)
-                client_socket.connect(("192.168.0.31", 50000))
+                client_socket.connect(("192.168.0.27", 50000))
 
                 # lat = 36.693575
                 # lon = 126.580372 
@@ -389,8 +400,8 @@ async def upload_fire_detection(
                 # client_socket.sendall(data)
 
                 message = {
-                    "lat": lat,
-                    "lon": lon
+                    "latitude": round(lat, 6),
+                    "longitude": round(lon, 6)
                 }
 
                 # JSON 문자열 + 개행 문자(필요한지는 수신 코드에 따라 다름. readline() 처럼 개행까지
