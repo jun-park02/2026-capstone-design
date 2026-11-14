@@ -455,9 +455,25 @@ const coordinateFromHeatmapPoint = (
     return lat === null || lng === null ? null : [lat, lng];
   }
 
-  const lat = toNumber(point.lat ?? point.y);
-  const lng = toNumber(point.lon ?? point.lng ?? point.x);
-  return lat === null || lng === null ? null : [lat, lng];
+  const lat = toNumber(point.lat);
+  const lng = toNumber(point.lon ?? point.lng);
+  if (lat !== null && lng !== null) {
+    return [lat, lng];
+  }
+
+  const x = toNumber(point.x);
+  const y = toNumber(point.y);
+  if (x === null || y === null) {
+    return null;
+  }
+
+  // Legacy uploads use degrees; prediction heatmaps use EPSG:3857 meters.
+  if (Math.abs(x) <= 180 && Math.abs(y) <= 90) {
+    return [y, x];
+  }
+
+  const coordinate = L.CRS.EPSG3857.unproject(L.point(x, y));
+  return [coordinate.lat, coordinate.lng];
 };
 
 const coordinatesFromHeatmapPayload = (payload: HeatmapOverlayPayload): [Coordinate, Coordinate] | null => {
@@ -1058,7 +1074,7 @@ export const MapPage: React.FC = () => {
                     </div>
                     <div>전압: {formatVoltage(drone.voltage)}</div>
                     <div>고도: {formatMeters(drone.alt)}</div>
-                    <div>상대고도: {formatMeters(drone.relativeAlt)}</div>
+                    <div>상대고도: {formatMeters(drone.relativeAlt === null ? null : Math.abs(drone.relativeAlt))}</div>
                     <div>속력: {formatSpeed(drone.va)}</div>
                     <div>헤딩: {formatHeading(drone.heading)}</div>
                   </div>
@@ -1129,7 +1145,7 @@ export const MapPage: React.FC = () => {
                       <p><span className="text-slate-500">배터리:</span> {formatBattery(drone.battery)}</p>
                       <p><span className="text-slate-500">전압:</span> {formatVoltage(drone.voltage)}</p>
                       <p><span className="text-slate-500">고도:</span> {formatMeters(drone.alt)}</p>
-                      <p><span className="text-slate-500">상대고도:</span> {formatMeters(drone.relativeAlt)}</p>
+                      <p><span className="text-slate-500">상대고도:</span> {formatMeters(drone.relativeAlt === null ? null : Math.abs(drone.relativeAlt))}</p>
                       <p><span className="text-slate-500">속력:</span> {formatSpeed(drone.va)}</p>
                       <p><span className="text-slate-500">헤딩:</span> {formatHeading(drone.heading)}</p>
                       <p><span className="text-slate-500">위치:</span> {drone.lat.toFixed(4)}, {drone.lng.toFixed(4)}</p>
