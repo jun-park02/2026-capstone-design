@@ -5,8 +5,7 @@ from datetime import datetime, UTC
 
 IMAGE_UPLOAD_FASTAPI = "http://localhost:14551"
 
-# 이게 구조가
-# 이미지 수신 fastapi -> redis? -> fastapi
+# 정상적인 업로드
 def test_upload_rgb_and_ir_images(
         image_file
 ):
