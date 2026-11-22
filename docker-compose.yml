@@ -244,14 +244,16 @@ services:
     image: grafana/grafana:latest
     ports:
       - "127.0.0.1:3000:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
     networks:
       - app-network
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
     restart: unless-stopped
-
+   
   elasticsearch:
     # 얘네는 버전을 맞추는게 좋음
     image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
@@ -279,6 +281,17 @@ services:
     depends_on:
       - elasticsearch
     restart: unless-stopped
+
+  kibana-init:
+    image: curlimages/curl:8.12.1
+    entrypoint: ["/bin/sh", "/setup/init.sh"]
+    volumes:
+      - ./monitoring/kibana:/setup:ro
+    networks:
+      - app-network
+    depends_on:
+      - kibana
+    restart: "no"
 
   filebeat:
     image: docker.elastic.co/beats/filebeat:9.5.5
